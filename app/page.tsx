@@ -27,8 +27,6 @@ type PanelResult = LlmResult & {
 type ModelRow = {
   label: string;
   model: string;
-  inputPrice: string;
-  outputPrice: string;
 };
 
 const modelGroups = [
@@ -120,25 +118,6 @@ function formatCost(value: number | null | undefined) {
   return `$${value.toFixed(6)}`;
 }
 
-function calculateManualCost(
-  usage: Usage,
-  inputPrice: string,
-  outputPrice: string,
-) {
-  const promptTokens = usage.promptTokens ?? 0;
-  const completionTokens = usage.completionTokens ?? 0;
-  const input = Number(inputPrice.replace(",", "."));
-  const output = Number(outputPrice.replace(",", "."));
-  if (!Number.isFinite(input) && !Number.isFinite(output)) {
-    return null;
-  }
-  const inputCost = Number.isFinite(input) ? (promptTokens / 1_000_000) * input : 0;
-  const outputCost = Number.isFinite(output)
-    ? (completionTokens / 1_000_000) * output
-    : 0;
-  return inputCost + outputCost;
-}
-
 export default function Home() {
   const [activeDay, setActiveDay] = useState<DayKey>("day1");
   const [prompt, setPrompt] = useState(defaultPrompts.day1);
@@ -155,22 +134,16 @@ export default function Home() {
       model:
         process.env.NEXT_PUBLIC_MODEL_WEAK ||
         "meta-llama/llama-3.2-1b-instruct",
-      inputPrice: "",
-      outputPrice: "",
     },
     {
       label: "Средняя",
       model: process.env.NEXT_PUBLIC_MODEL_MEDIUM || "qwen/qwen3-32b",
-      inputPrice: "",
-      outputPrice: "",
     },
     {
       label: "Сильная",
       model:
         process.env.NEXT_PUBLIC_MODEL_STRONG ||
         "qwen/qwen3-235b-a22b-thinking-2507",
-      inputPrice: "",
-      outputPrice: "",
     },
   ]);
   const [results, setResults] = useState<PanelResult[]>([]);
@@ -311,11 +284,6 @@ ${formatInstruction}
             });
             return {
               title: row.label,
-              manualCost: calculateManualCost(
-                result.usage,
-                row.inputPrice,
-                row.outputPrice,
-              ),
               ...result,
             };
           }),
@@ -442,38 +410,20 @@ ${formatInstruction}
               {modelRows.map((row, index) => (
                 <div className="model-row" key={row.label}>
                   <strong>{row.label}</strong>
-                  <input
+                  <select
                     onChange={(event) => {
                       const next = [...modelRows];
                       next[index] = { ...next[index], model: event.target.value };
                       setModelRows(next);
                     }}
                     value={row.model}
-                  />
-                  <input
-                    onChange={(event) => {
-                      const next = [...modelRows];
-                      next[index] = {
-                        ...next[index],
-                        inputPrice: event.target.value,
-                      };
-                      setModelRows(next);
-                    }}
-                    placeholder="$ / 1M input"
-                    value={row.inputPrice}
-                  />
-                  <input
-                    onChange={(event) => {
-                      const next = [...modelRows];
-                      next[index] = {
-                        ...next[index],
-                        outputPrice: event.target.value,
-                      };
-                      setModelRows(next);
-                    }}
-                    placeholder="$ / 1M output"
-                    value={row.outputPrice}
-                  />
+                  >
+                    {(modelGroups[index]?.options ?? []).map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label} В· {option.value}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               ))}
             </div>

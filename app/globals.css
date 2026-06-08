@@ -172,7 +172,7 @@ textarea:focus {
   padding: 10px;
 }
 
-.model-row input {
+.model-row select {
   grid-column: 1 / -1;
 }
 
