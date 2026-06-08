@@ -148,6 +148,7 @@ export default function Home() {
   );
   const [maxTokens, setMaxTokens] = useState("160");
   const [stopSequence, setStopSequence] = useState("END");
+  const [temperatures, setTemperatures] = useState(["0", "0.7", "1.2"]);
   const [modelRows, setModelRows] = useState<ModelRow[]>([
     {
       label: "Слабая",
@@ -280,28 +281,25 @@ ${formatInstruction}
       }
 
       if (activeDay === "day4") {
-        const [cold, balanced, creative] = await Promise.all([
-          runLlm({
-            prompt,
-            model: model || undefined,
-            temperature: 0,
-          }),
-          runLlm({
-            prompt,
-            model: model || undefined,
-            temperature: 0.7,
-          }),
-          runLlm({
-            prompt,
-            model: model || undefined,
-            temperature: 1.2,
-          }),
-        ]);
-        setResults([
-          { title: "temperature = 0", ...cold },
-          { title: "temperature = 0.7", ...balanced },
-          { title: "temperature = 1.2", ...creative },
-        ]);
+        const parsedTemperatures = temperatures.map((value) => {
+          const parsed = Number(value.replace(",", "."));
+          return Number.isFinite(parsed) ? parsed : 0;
+        });
+        const temperatureResults = await Promise.all(
+          parsedTemperatures.map((temperature) =>
+            runLlm({
+              prompt,
+              model: model || undefined,
+              temperature,
+            }),
+          ),
+        );
+        setResults(
+          temperatureResults.map((result, index) => ({
+            title: `temperature = ${parsedTemperatures[index]}`,
+            ...result,
+          })),
+        );
       }
 
       if (activeDay === "day5") {
@@ -417,6 +415,25 @@ ${formatInstruction}
                   value={stopSequence}
                 />
               </label>
+            </div>
+          )}
+
+          {activeDay === "day4" && (
+            <div className="control-grid">
+              {temperatures.map((temperature, index) => (
+                <label key={index}>
+                  Temperature {index + 1}
+                  <input
+                    inputMode="decimal"
+                    onChange={(event) => {
+                      const next = [...temperatures];
+                      next[index] = event.target.value;
+                      setTemperatures(next);
+                    }}
+                    value={temperature}
+                  />
+                </label>
+              ))}
             </div>
           )}
 
