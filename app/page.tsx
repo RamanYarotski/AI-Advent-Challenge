@@ -2,7 +2,7 @@
 
 import { FormEvent, useMemo, useState } from "react";
 
-type DayKey = "day1" | "day2" | "day3" | "day4" | "day5";
+type DayKey = "day1" | "day2" | "day3" | "day4" | "day5" | "day6";
 
 type Usage = {
   promptTokens: number | null;
@@ -18,10 +18,17 @@ type LlmResult = {
   usage: Usage;
 };
 
+type AgentTrace = {
+  step: string;
+  label: string;
+  detail: string;
+};
+
 type PanelResult = LlmResult & {
   title: string;
   note?: string;
   manualCost?: number | null;
+  trace?: AgentTrace[];
 };
 
 type ModelRow = {
@@ -31,7 +38,7 @@ type ModelRow = {
 
 const modelGroups = [
   {
-    label: "Слабая",
+    label: "Weak",
     options: [
       {
         value: "meta-llama/llama-3.2-1b-instruct",
@@ -42,7 +49,7 @@ const modelGroups = [
     ],
   },
   {
-    label: "Средняя",
+    label: "Medium",
     options: [
       { value: "qwen/qwen3-32b", label: "Qwen3 32B" },
       {
@@ -53,7 +60,7 @@ const modelGroups = [
     ],
   },
   {
-    label: "Сильная",
+    label: "Strong",
     options: [
       {
         value: "qwen/qwen3-235b-a22b-thinking-2507",
@@ -69,22 +76,25 @@ const modelGroups = [
 
 const defaultModel = "openai/gpt-4o";
 
-const tabs: Array<{ key: DayKey; label: string; title: string }> = [
-  { key: "day1", label: "Day 1 API", title: "Первый запрос к LLM через API" },
-  { key: "day2", label: "Day 2 Format", title: "Формат ответа" },
-  { key: "day3", label: "Day 3 Reasoning", title: "Разные способы рассуждения" },
-  { key: "day4", label: "Day 4 Temperature", title: "Температура" },
-  { key: "day5", label: "Day 5 Models", title: "Версии моделей" },
+const days: Array<{ key: DayKey; label: string; title: string }> = [
+  { key: "day1", label: "Day 1 API", title: "First LLM API request" },
+  { key: "day2", label: "Day 2 Format", title: "Response format control" },
+  { key: "day3", label: "Day 3 Reasoning", title: "Reasoning strategies" },
+  { key: "day4", label: "Day 4 Temperature", title: "Temperature comparison" },
+  { key: "day5", label: "Day 5 Models", title: "Model version comparison" },
+  { key: "day6", label: "Day 6 Agent", title: "First agent" },
 ];
 
 const defaultPrompts: Record<DayKey, string> = {
-  day1: "Объясни простыми словами, что такое промптинг, в 5 предложениях.",
-  day2: "Расскажи, как разработчику использовать LLM в ежедневной работе.",
+  day1: "Explain what prompt engineering is in 5 simple sentences.",
+  day2: "Explain how a developer can use LLMs in everyday work.",
   day3:
-    "У меня есть 9 монет, одна из них легче остальных. Как найти легкую монету за два взвешивания на чашечных весах?",
-  day4: "Придумай короткую идею pet-проекта для разработчика, который изучает AI.",
+    "I have 9 coins. One coin is lighter than the others. How can I find the lighter coin in two weighings on a balance scale?",
+  day4: "Suggest a short pet project idea for a developer learning AI.",
   day5:
-    "Можно ли использовать несуществующую библиотеку react-ai-router-kit для production-проекта? Ответь как инженер.",
+    "Can I use a non-existent library called react-ai-router-kit in a production project? Answer as an engineer.",
+  day6:
+    "Explain what an agent is in an LLM application in 3 short sentences.",
 };
 
 async function runLlm(input: {
@@ -107,8 +117,25 @@ async function runLlm(input: {
   return payload as LlmResult;
 }
 
+async function runAgent(input: {
+  prompt: string;
+  model?: string;
+  system?: string;
+}) {
+  const response = await fetch("/api/agent/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Agent request failed.");
+  }
+  return payload as LlmResult & { trace: AgentTrace[] };
+}
+
 function formatTokens(value: number | null) {
-  return value === null ? "n/a" : value.toLocaleString("ru-RU");
+  return value === null ? "n/a" : value.toLocaleString("en-US");
 }
 
 function formatCost(value: number | null | undefined) {
@@ -123,24 +150,24 @@ export default function Home() {
   const [prompt, setPrompt] = useState(defaultPrompts.day1);
   const [model, setModel] = useState(defaultModel);
   const [formatInstruction, setFormatInstruction] = useState(
-    "Верни JSON с полями summary, bullets, final_marker.",
+    "Return JSON with the fields summary, bullets, and final_marker.",
   );
   const [maxTokens, setMaxTokens] = useState("160");
   const [stopSequence, setStopSequence] = useState("END");
   const [temperatures, setTemperatures] = useState(["0", "0.7", "1.2"]);
   const [modelRows, setModelRows] = useState<ModelRow[]>([
     {
-      label: "Слабая",
+      label: "Weak",
       model:
         process.env.NEXT_PUBLIC_MODEL_WEAK ||
         "meta-llama/llama-3.2-1b-instruct",
     },
     {
-      label: "Средняя",
+      label: "Medium",
       model: process.env.NEXT_PUBLIC_MODEL_MEDIUM || "qwen/qwen3-32b",
     },
     {
-      label: "Сильная",
+      label: "Strong",
       model:
         process.env.NEXT_PUBLIC_MODEL_STRONG ||
         "qwen/qwen3-235b-a22b-thinking-2507",
@@ -151,8 +178,8 @@ export default function Home() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const activeTab = useMemo(
-    () => tabs.find((tab) => tab.key === activeDay) ?? tabs[0],
+  const activeDayMeta = useMemo(
+    () => days.find((day) => day.key === activeDay) ?? days[0],
     [activeDay],
   );
 
@@ -183,10 +210,10 @@ export default function Home() {
       if (activeDay === "day2") {
         const controlledPrompt = `${prompt}
 
-Требования к ответу:
+Response requirements:
 ${formatInstruction}
-Ограничь ответ примерно ${maxTokens || "160"} токенами.
-Заверши ответ строкой ${stopSequence || "END"}.`;
+Limit the answer to about ${maxTokens || "160"} tokens.
+Finish the answer with the line ${stopSequence || "END"}.`;
         const [baseline, controlled] = await Promise.all([
           runLlm({
             prompt,
@@ -200,22 +227,22 @@ ${formatInstruction}
           }),
         ]);
         setResults([
-          { title: "Без ограничений", ...baseline },
-          { title: "С контролем формата", ...controlled },
+          { title: "Baseline", ...baseline },
+          { title: "Controlled format", ...controlled },
         ]);
       }
 
       if (activeDay === "day3") {
         const directPrompt = prompt;
-        const stepPrompt = `${prompt}\n\nРешай пошагово. В конце дай короткий финальный ответ.`;
-        const metaPromptRequest = `Составь сильный промпт для решения этой задачи через LLM. Верни только готовый промпт:\n\n${prompt}`;
+        const stepPrompt = `${prompt}\n\nSolve step by step. End with a short final answer.`;
+        const metaPromptRequest = `Create a strong prompt for solving this task with an LLM. Return only the ready-to-use prompt:\n\n${prompt}`;
         const expertsPrompt = `${prompt}
 
-Реши задачу как группа экспертов:
-1. Аналитик формулирует ход решения.
-2. Инженер проверяет практическую корректность.
-3. Критик ищет ошибку.
-4. Модератор дает финальный ответ.`;
+Solve the task as a group of experts:
+1. The analyst explains the solution path.
+2. The engineer checks practical correctness.
+3. The critic looks for mistakes.
+4. The moderator gives the final answer.`;
 
         const [direct, step, metaPrompt, experts] = await Promise.all([
           runLlm({
@@ -242,14 +269,14 @@ ${formatInstruction}
         });
 
         setResults([
-          { title: "Прямой ответ", ...direct },
-          { title: "Решай пошагово", ...step },
+          { title: "Direct answer", ...direct },
+          { title: "Step-by-step", ...step },
           {
-            title: "Промпт от модели",
+            title: "Model-generated prompt",
             note: metaPrompt.answer,
             ...generated,
           },
-          { title: "Группа экспертов", ...experts },
+          { title: "Expert group", ...experts },
         ]);
       }
 
@@ -290,6 +317,14 @@ ${formatInstruction}
         );
         setResults(day5Results);
       }
+
+      if (activeDay === "day6") {
+        const result = await runAgent({
+          prompt,
+          model: model || undefined,
+        });
+        setResults([{ title: "SimpleAgent response", ...result }]);
+      }
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -306,33 +341,34 @@ ${formatInstruction}
       <section className="topbar">
         <div>
           <p className="eyebrow">AI Advent Challenge</p>
-          <h1>5 дней LLM API практики</h1>
+          <h1>LLM API Practice</h1>
         </div>
         <div className="status">OpenAI-compatible API</div>
       </section>
 
-      <nav className="tabs" aria-label="Days">
-        {tabs.map((tab) => (
-          <button
-            className={tab.key === activeDay ? "tab active" : "tab"}
-            key={tab.key}
-            onClick={() => switchDay(tab.key)}
-            type="button"
-          >
-            {tab.label}
-          </button>
-        ))}
-      </nav>
+      <label className="day-picker">
+        Day
+        <select
+          onChange={(event) => switchDay(event.target.value as DayKey)}
+          value={activeDay}
+        >
+          {days.map((day) => (
+            <option key={day.key} value={day.key}>
+              {day.label}
+            </option>
+          ))}
+        </select>
+      </label>
 
       <section className="workspace">
         <form className="controls" onSubmit={runDay}>
           <div>
-            <p className="eyebrow">Задание</p>
-            <h2>{activeTab.title}</h2>
+            <p className="eyebrow">Task</p>
+            <h2>{activeDayMeta.title}</h2>
           </div>
 
           <label>
-            Запрос
+            Prompt
             <textarea
               onChange={(event) => setPrompt(event.target.value)}
               rows={7}
@@ -341,7 +377,7 @@ ${formatInstruction}
           </label>
 
           <label>
-            Модель
+            Model
             <select
               onChange={(event) => setModel(event.target.value)}
               value={model}
@@ -350,7 +386,7 @@ ${formatInstruction}
                 <optgroup key={group.label} label={group.label}>
                   {group.options.map((option) => (
                     <option key={option.value} value={option.value}>
-                      {option.label} · {option.value}
+                      {option.label} - {option.value}
                     </option>
                   ))}
                 </optgroup>
@@ -361,7 +397,7 @@ ${formatInstruction}
           {activeDay === "day2" && (
             <div className="control-grid">
               <label>
-                Формат ответа
+                Response format
                 <textarea
                   onChange={(event) => setFormatInstruction(event.target.value)}
                   rows={3}
@@ -413,14 +449,17 @@ ${formatInstruction}
                   <select
                     onChange={(event) => {
                       const next = [...modelRows];
-                      next[index] = { ...next[index], model: event.target.value };
+                      next[index] = {
+                        ...next[index],
+                        model: event.target.value,
+                      };
                       setModelRows(next);
                     }}
                     value={row.model}
                   >
                     {(modelGroups[index]?.options ?? []).map((option) => (
                       <option key={option.value} value={option.value}>
-                        {option.label} В· {option.value}
+                        {option.label} - {option.value}
                       </option>
                     ))}
                   </select>
@@ -430,7 +469,7 @@ ${formatInstruction}
           )}
 
           <button className="run" disabled={loading} type="submit">
-            {loading ? "Выполняю..." : "Запустить задание"}
+            {loading ? "Running..." : "Run task"}
           </button>
           {error && <p className="error">{error}</p>}
         </form>
@@ -438,10 +477,11 @@ ${formatInstruction}
         <section className="results">
           {results.length === 0 && !loading && (
             <div className="empty">
-              Выбери день, проверь prompt и запусти запрос. Ответы и метрики появятся здесь.
+              Select a day, review the prompt, and run the request. Answers and
+              metrics will appear here.
             </div>
           )}
-          {loading && <div className="empty">Запрос выполняется...</div>}
+          {loading && <div className="empty">Request is running...</div>}
 
           {activeDay === "day5" && results.length > 0 ? (
             <DayFiveTable results={results} />
@@ -453,12 +493,12 @@ ${formatInstruction}
             </div>
           )}
 
-          {results.length > 0 && (
+          {results.length > 0 && activeDay !== "day6" && (
             <label className="conclusion">
-              Короткий вывод для видео
+              Short video conclusion
               <textarea
                 onChange={(event) => setConclusion(event.target.value)}
-                placeholder="Зафиксируй, какой вариант оказался лучше и почему."
+                placeholder="Capture which option worked best and why."
                 rows={4}
                 value={conclusion}
               />
@@ -489,8 +529,22 @@ function ResultCard({ result }: { result: PanelResult }) {
       </div>
       {result.note && (
         <details>
-          <summary>Сгенерированный промпт</summary>
+          <summary>Generated prompt</summary>
           <pre>{result.note}</pre>
+        </details>
+      )}
+      {result.trace && (
+        <details open>
+          <summary>Agent trace</summary>
+          <ol className="trace-list">
+            {result.trace.map((item) => (
+              <li key={item.step}>
+                <strong>{item.label}</strong>
+                <span>{item.step}</span>
+                <pre>{item.detail}</pre>
+              </li>
+            ))}
+          </ol>
         </details>
       )}
       <pre className="answer">{result.answer || "No content returned."}</pre>
@@ -504,12 +558,12 @@ function DayFiveTable({ results }: { results: PanelResult[] }) {
       <table>
         <thead>
           <tr>
-            <th>Уровень</th>
-            <th>Модель</th>
-            <th>Время</th>
-            <th>Токены</th>
-            <th>Стоимость</th>
-            <th>Ответ</th>
+            <th>Level</th>
+            <th>Model</th>
+            <th>Time</th>
+            <th>Tokens</th>
+            <th>Cost</th>
+            <th>Answer</th>
           </tr>
         </thead>
         <tbody>

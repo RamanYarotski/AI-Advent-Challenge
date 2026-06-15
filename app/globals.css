@@ -77,28 +77,13 @@ textarea {
   padding: 10px 12px;
 }
 
-.tabs {
-  display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  margin-bottom: 16px;
-}
-
-.tab {
-  background: #e8edf3;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  color: #344054;
-  cursor: pointer;
-  min-height: 44px;
-  padding: 10px;
-}
-
-.tab.active {
+.day-picker {
   background: var(--panel);
-  border-color: var(--accent);
-  color: var(--accent-dark);
-  font-weight: 800;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  max-width: 420px;
+  padding: 14px;
 }
 
 .workspace {
@@ -293,6 +278,28 @@ summary {
   font-weight: 800;
 }
 
+.trace-list {
+  display: grid;
+  gap: 8px;
+  list-style-position: inside;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.trace-list li {
+  background: #fbfcfe;
+  border: 1px solid #e5e9f0;
+  border-radius: 6px;
+  display: grid;
+  gap: 5px;
+  padding: 9px;
+}
+
+.trace-list span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .conclusion {
   margin-top: 14px;
 }
@@ -340,7 +347,6 @@ td pre {
     flex-direction: column;
   }
 
-  .tabs,
   .workspace {
     grid-template-columns: 1fr;
   }
