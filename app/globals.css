@@ -93,6 +93,10 @@ textarea {
   grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
 }
 
+.day8-workspace {
+  grid-template-columns: 1fr;
+}
+
 .controls,
 .results,
 .result-card,
@@ -243,6 +247,274 @@ textarea:focus {
   text-transform: capitalize;
 }
 
+.token-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.token-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+}
+
+.token-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+
+.risk {
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 5px 8px;
+  text-transform: uppercase;
+}
+
+.risk.ok {
+  background: #ecfdf3;
+  color: #027a48;
+}
+
+.risk.watch {
+  background: #fffaeb;
+  color: #b54708;
+}
+
+.risk.over_budget {
+  background: #fff1f0;
+  color: var(--danger);
+}
+
+.token-lab {
+  display: grid;
+  gap: 14px;
+}
+
+.dialog-tabs {
+  align-items: end;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-top: 2px;
+}
+
+.dialog-tab {
+  align-items: center;
+  background: #e8edf3;
+  border: 1px solid var(--line);
+  border-bottom: 0;
+  border-radius: 7px 7px 0 0;
+  display: flex;
+  min-width: 118px;
+}
+
+.dialog-tab.active {
+  background: var(--panel);
+  border-color: var(--accent);
+}
+
+.tab-select,
+.tab-close,
+.tab-rename,
+.dialog-add {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.tab-select {
+  color: #344054;
+  flex: 1;
+  font-weight: 800;
+  padding: 10px 8px;
+  text-align: left;
+}
+
+.dialog-tab.active .tab-select {
+  color: var(--accent-dark);
+}
+
+.tab-close {
+  color: var(--muted);
+  font-weight: 900;
+  padding: 10px 9px;
+}
+
+.tab-close:hover {
+  color: var(--danger);
+}
+
+.tab-rename {
+  color: var(--accent-dark);
+  font-size: 11px;
+  font-weight: 800;
+  padding: 10px 5px;
+  text-transform: uppercase;
+}
+
+.tab-rename:hover {
+  color: var(--accent);
+}
+
+.dialog-add {
+  background: var(--accent);
+  border-radius: 6px 6px 0 0;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 900;
+  min-width: 42px;
+  padding: 8px 12px;
+}
+
+.chat-composer {
+  background: #fbfcfe;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.chat-composer textarea {
+  border-color: #d0d7e2;
+  min-height: 112px;
+}
+
+.composer-controls {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(240px, 1.1fr) minmax(260px, 1fr) auto;
+}
+
+.composer-controls .run {
+  min-width: 112px;
+}
+
+.context-usage {
+  display: grid;
+  gap: 6px;
+}
+
+.context-usage div:first-child {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.context-usage strong {
+  color: #344054;
+  font-size: 14px;
+}
+
+.context-usage span,
+.context-usage small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.context-bar {
+  background: #e8edf3;
+  border-radius: 999px;
+  height: 10px;
+  overflow: hidden;
+}
+
+.context-bar span {
+  background: var(--accent);
+  display: block;
+  height: 100%;
+}
+
+.metrics-details {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.metrics-details summary {
+  color: var(--accent-dark);
+}
+
+.cost-warning {
+  background: #fffaeb;
+  border: 1px solid #fedf89;
+  border-radius: 8px;
+  color: #93370d;
+  font-weight: 800;
+  padding: 12px;
+}
+
+.cost-graphs {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.cost-graph {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.cost-graph h3 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.cost-graph svg {
+  background: #fbfcfe;
+  border: 1px solid #e5e9f0;
+  border-radius: 6px;
+  width: 100%;
+}
+
+.axis-label {
+  fill: #344054;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.tick-label {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
+.axis {
+  stroke: #98a2b3;
+  stroke-width: 1;
+}
+
+.graph-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3;
+}
+
+.graph-dot {
+  fill: var(--accent-dark);
+}
+
+.graph-scale {
+  color: var(--muted);
+  display: flex;
+  font-size: 12px;
+  justify-content: space-between;
+}
+
 .card-head {
   align-items: center;
   display: flex;
@@ -380,5 +652,9 @@ td pre {
 
   .controls {
     position: static;
+  }
+
+  .composer-controls {
+    grid-template-columns: 1fr;
   }
 }
