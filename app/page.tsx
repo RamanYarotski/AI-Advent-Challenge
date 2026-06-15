@@ -10,7 +10,8 @@ type DayKey =
   | "day5"
   | "day6"
   | "day7"
-  | "day8";
+  | "day8"
+  | "day9";
 
 type Usage = {
   promptTokens: number | null;
@@ -68,6 +69,7 @@ type TokenDialog = {
   title: string;
   messages: ChatMessage[];
   metrics: TokenMetricRow[];
+  summary?: string;
 };
 
 type TokenLabState = {
@@ -161,6 +163,7 @@ const days: Array<{ key: DayKey; label: string; title: string }> = [
   { key: "day6", label: "Day 6 Agent", title: "First agent" },
   { key: "day7", label: "Day 7 Memory", title: "Persistent context" },
   { key: "day8", label: "Day 8 Tokens", title: "Token usage analysis" },
+  { key: "day9", label: "Day 9 Compression", title: "History compression" },
 ];
 
 const defaultPrompts: Record<DayKey, string> = {
@@ -177,6 +180,8 @@ const defaultPrompts: Record<DayKey, string> = {
     "Remember this: my demo project is an AI Advent Challenge web chat. Reply with one short confirmation.",
   day8:
     "Explain why token usage grows in a long LLM conversation. Keep the answer practical.",
+  day9:
+    "Using the previous dialog context, explain the main user goal and next best action.",
 };
 
 async function runLlm(input: {
@@ -278,6 +283,40 @@ async function runTokenAction(input: {
   return payload as TokenLabState;
 }
 
+async function loadCompressionLab() {
+  const response = await fetch("/api/agent/compress");
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Failed to load compression dialogs.");
+  }
+  return payload as TokenLabState;
+}
+
+async function runCompressionAction(input: {
+  action:
+    | "create_dialog"
+    | "delete_dialog"
+    | "send_message"
+    | "set_active_dialog"
+    | "rename_dialog";
+  dialogId?: string;
+  title?: string;
+  prompt?: string;
+  model?: string;
+  recentMessages?: number;
+}) {
+  const response = await fetch("/api/agent/compress", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Compression dialog action failed.");
+  }
+  return payload as TokenLabState;
+}
+
 function formatTokens(value: number | null) {
   return value === null ? "n/a" : value.toLocaleString("en-US");
 }
@@ -353,6 +392,8 @@ export default function Home() {
   const [results, setResults] = useState<PanelResult[]>([]);
   const [memoryHistory, setMemoryHistory] = useState<ChatMessage[]>([]);
   const [tokenLab, setTokenLab] = useState<TokenLabState | null>(null);
+  const [compressionLab, setCompressionLab] = useState<TokenLabState | null>(null);
+  const [recentMessages, setRecentMessages] = useState("4");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -415,6 +456,33 @@ export default function Home() {
     };
   }, [activeDay]);
 
+  useEffect(() => {
+    if (activeDay !== "day9") {
+      return;
+    }
+
+    let cancelled = false;
+    loadCompressionLab()
+      .then((lab) => {
+        if (!cancelled) {
+          setCompressionLab(lab);
+        }
+      })
+      .catch((labError) => {
+        if (!cancelled) {
+          setError(
+            labError instanceof Error
+              ? labError.message
+              : "Failed to load compression dialogs.",
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDay]);
+
   const activeTokenDialog = useMemo(() => {
     if (!tokenLab) {
       return null;
@@ -425,6 +493,17 @@ export default function Home() {
       ) ?? tokenLab.dialogs[0]
     );
   }, [tokenLab]);
+
+  const activeCompressionDialog = useMemo(() => {
+    if (!compressionLab) {
+      return null;
+    }
+    return (
+      compressionLab.dialogs.find(
+        (dialog) => dialog.id === compressionLab.activeDialogId,
+      ) ?? compressionLab.dialogs[0]
+    );
+  }, [compressionLab]);
 
   async function updateTokenLab(
     action: Parameters<typeof runTokenAction>[0],
@@ -473,6 +552,77 @@ export default function Home() {
     });
   }
 
+  async function updateCompressionLab(
+    action: Parameters<typeof runCompressionAction>[0],
+  ) {
+    setLoading(true);
+    setError("");
+    try {
+      const nextLab = await runCompressionAction(action);
+      setCompressionLab(nextLab);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Unexpected compression dialog error.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function createCompressionDialog() {
+    void updateCompressionLab({ action: "create_dialog" });
+  }
+
+  function setActiveCompressionDialog(dialogId: string) {
+    void updateCompressionLab({ action: "set_active_dialog", dialogId });
+  }
+
+  function deleteCompressionDialog(dialog: TokenDialog) {
+    const confirmed = window.confirm(`Delete ${dialog.title}?`);
+    if (!confirmed) {
+      return;
+    }
+    void updateCompressionLab({ action: "delete_dialog", dialogId: dialog.id });
+  }
+
+  function renameCompressionDialog(dialog: TokenDialog) {
+    const title = window.prompt("Rename dialog", dialog.title)?.trim();
+    if (!title || title === dialog.title) {
+      return;
+    }
+    void updateCompressionLab({
+      action: "rename_dialog",
+      dialogId: dialog.id,
+      title,
+    });
+  }
+
+  async function sendCompressionMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const nextLab = await runCompressionAction({
+        action: "send_message",
+        prompt,
+        model: model || undefined,
+        recentMessages: Number(recentMessages) || undefined,
+      });
+      setCompressionLab(nextLab);
+      setPrompt("");
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Unexpected compression dialog error.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function sendTokenMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
@@ -501,18 +651,20 @@ export default function Home() {
     setPrompt(defaultPrompts[day]);
     setResults([]);
     setTokenLab(null);
+    setCompressionLab(null);
     setError("");
   }
 
   async function runDay(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (activeDay === "day8") {
+    if (activeDay === "day8" || activeDay === "day9") {
       return;
     }
     setLoading(true);
     setError("");
     setResults([]);
     setTokenLab(null);
+    setCompressionLab(null);
 
     try {
       if (activeDay === "day1") {
@@ -650,6 +802,7 @@ Solve the task as a group of experts:
         setMemoryHistory(result.history);
         setResults([{ title: "MemoryAgent response", ...result }]);
       }
+
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -687,10 +840,12 @@ Solve the task as a group of experts:
 
       <section
         className={
-          activeDay === "day8" ? "workspace day8-workspace" : "workspace"
+          activeDay === "day8" || activeDay === "day9"
+            ? "workspace day8-workspace"
+            : "workspace"
         }
       >
-        {activeDay !== "day8" && (
+        {activeDay !== "day8" && activeDay !== "day9" && (
         <form className="controls" onSubmit={runDay}>
           <div>
             <p className="eyebrow">Task</p>
@@ -806,7 +961,9 @@ Solve the task as a group of experts:
         )}
 
         <section className="results">
-          {activeDay === "day8" && error && <p className="error">{error}</p>}
+          {(activeDay === "day8" || activeDay === "day9") && error && (
+            <p className="error">{error}</p>
+          )}
           {activeDay === "day8" && tokenLab && (
             <TokenLabView
               activeDialog={activeTokenDialog}
@@ -823,8 +980,30 @@ Solve the task as a group of experts:
               setPrompt={setPrompt}
             />
           )}
+          {activeDay === "day9" && compressionLab && (
+            <TokenLabView
+              activeDialog={activeCompressionDialog}
+              lab={compressionLab}
+              loading={loading}
+              model={model}
+              mode="compression"
+              onCreate={createCompressionDialog}
+              onDelete={deleteCompressionDialog}
+              onModelChange={setModel}
+              onRename={renameCompressionDialog}
+              onSelect={setActiveCompressionDialog}
+              onSend={sendCompressionMessage}
+              prompt={prompt}
+              recentMessages={recentMessages}
+              setPrompt={setPrompt}
+              setRecentMessages={setRecentMessages}
+            />
+          )}
 
-          {results.length === 0 && !loading && activeDay !== "day8" && (
+          {results.length === 0 &&
+            !loading &&
+            activeDay !== "day8" &&
+            activeDay !== "day9" && (
             <div className="empty">
               Select a day, review the prompt, and run the request. Answers and
               metrics will appear here.
@@ -834,7 +1013,7 @@ Solve the task as a group of experts:
 
           {activeDay === "day5" && results.length > 0 ? (
             <DayFiveTable results={results} />
-          ) : activeDay === "day8" ? null : (
+          ) : activeDay === "day8" || activeDay === "day9" ? null : (
             <div className="result-grid">
               {results.map((result) => (
                 <ResultCard key={result.title} result={result} />
@@ -963,6 +1142,7 @@ function TokenLabView({
   lab,
   loading,
   model,
+  mode = "tokens",
   onCreate,
   onDelete,
   onModelChange,
@@ -970,12 +1150,15 @@ function TokenLabView({
   onSelect,
   onSend,
   prompt,
+  recentMessages,
+  setRecentMessages,
   setPrompt,
 }: {
   activeDialog: TokenDialog | null;
   lab: TokenLabState;
   loading: boolean;
   model: string;
+  mode?: "tokens" | "compression";
   onCreate: () => void;
   onDelete: (dialog: TokenDialog) => void;
   onModelChange: (value: string) => void;
@@ -983,6 +1166,8 @@ function TokenLabView({
   onSelect: (dialogId: string) => void;
   onSend: (event: FormEvent<HTMLFormElement>) => void;
   prompt: string;
+  recentMessages?: string;
+  setRecentMessages?: (value: string) => void;
   setPrompt: (value: string) => void;
 }) {
   const rows = activeDialog?.metrics ?? [];
@@ -1050,6 +1235,12 @@ function TokenLabView({
         <div className="empty">Create a dialog to start measuring tokens.</div>
       ) : (
         <>
+          {mode === "compression" && activeDialog.summary && (
+            <details open className="metrics-details">
+              <summary>Compressed memory summary</summary>
+              <pre className="answer">{activeDialog.summary}</pre>
+            </details>
+          )}
           <ConversationHistory messages={activeDialog.messages} />
           <form className="chat-composer" onSubmit={onSend}>
             <textarea
@@ -1090,6 +1281,16 @@ function TokenLabView({
                   {contextPercent}% of OpenRouter max context for selected model
                 </small>
               </div>
+              {mode === "compression" && setRecentMessages && (
+                <label>
+                  Recent messages to keep
+                  <input
+                    inputMode="numeric"
+                    onChange={(event) => setRecentMessages(event.target.value)}
+                    value={recentMessages ?? "4"}
+                  />
+                </label>
+              )}
               <button className="run" disabled={loading} type="submit">
                 {loading ? "Sending..." : "Send"}
               </button>

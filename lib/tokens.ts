@@ -24,6 +24,7 @@ export type TokenDialog = {
   title: string;
   messages: ChatMessage[];
   metrics: TokenMetricRow[];
+  summary?: string;
 };
 
 export type TokenLabState = {

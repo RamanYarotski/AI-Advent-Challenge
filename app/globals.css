@@ -444,6 +444,37 @@ textarea:focus {
   color: var(--accent-dark);
 }
 
+.compression-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.compression-stats {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.compression-stats div {
+  background: #fbfcfe;
+  border: 1px solid #e5e9f0;
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+}
+
+.compression-stats strong {
+  color: #344054;
+  font-size: 13px;
+}
+
+.compression-stats span {
+  color: var(--accent-dark);
+  font-size: 18px;
+  font-weight: 900;
+}
+
 .cost-warning {
   background: #fffaeb;
   border: 1px solid #fedf89;
