@@ -212,6 +212,37 @@ textarea:focus {
   padding: 14px;
 }
 
+.history-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px;
+}
+
+.history-list {
+  display: grid;
+  gap: 10px;
+  max-height: 460px;
+  overflow: auto;
+}
+
+.history-message {
+  background: #fbfcfe;
+  border: 1px solid #e5e9f0;
+  border-radius: 6px;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+}
+
+.history-message strong {
+  color: var(--accent-dark);
+  text-transform: capitalize;
+}
+
 .card-head {
   align-items: center;
   display: flex;
@@ -298,10 +329,6 @@ summary {
 .trace-list span {
   color: var(--muted);
   font-size: 12px;
-}
-
-.conclusion {
-  margin-top: 14px;
 }
 
 .table-wrap {

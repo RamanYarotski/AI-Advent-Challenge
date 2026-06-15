@@ -1,8 +1,15 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
-type DayKey = "day1" | "day2" | "day3" | "day4" | "day5" | "day6";
+type DayKey =
+  | "day1"
+  | "day2"
+  | "day3"
+  | "day4"
+  | "day5"
+  | "day6"
+  | "day7";
 
 type Usage = {
   promptTokens: number | null;
@@ -18,6 +25,11 @@ type LlmResult = {
   usage: Usage;
 };
 
+type ChatMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
+
 type AgentTrace = {
   step: string;
   label: string;
@@ -29,6 +41,7 @@ type PanelResult = LlmResult & {
   note?: string;
   manualCost?: number | null;
   trace?: AgentTrace[];
+  history?: ChatMessage[];
 };
 
 type ModelRow = {
@@ -83,6 +96,7 @@ const days: Array<{ key: DayKey; label: string; title: string }> = [
   { key: "day4", label: "Day 4 Temperature", title: "Temperature comparison" },
   { key: "day5", label: "Day 5 Models", title: "Model version comparison" },
   { key: "day6", label: "Day 6 Agent", title: "First agent" },
+  { key: "day7", label: "Day 7 Memory", title: "Persistent context" },
 ];
 
 const defaultPrompts: Record<DayKey, string> = {
@@ -95,6 +109,8 @@ const defaultPrompts: Record<DayKey, string> = {
     "Can I use a non-existent library called react-ai-router-kit in a production project? Answer as an engineer.",
   day6:
     "Explain what an agent is in an LLM application in 3 short sentences.",
+  day7:
+    "Remember this: my demo project is an AI Advent Challenge web chat. Reply with one short confirmation.",
 };
 
 async function runLlm(input: {
@@ -132,6 +148,35 @@ async function runAgent(input: {
     throw new Error(payload.error || "Agent request failed.");
   }
   return payload as LlmResult & { trace: AgentTrace[] };
+}
+
+async function loadMemoryHistory() {
+  const response = await fetch("/api/agent/memory");
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Failed to load memory history.");
+  }
+  return payload.history as ChatMessage[];
+}
+
+async function runMemoryAgent(input: {
+  prompt: string;
+  model?: string;
+  system?: string;
+}) {
+  const response = await fetch("/api/agent/memory", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Memory agent request failed.");
+  }
+  return payload as LlmResult & {
+    history: ChatMessage[];
+    trace: AgentTrace[];
+  };
 }
 
 function formatTokens(value: number | null) {
@@ -174,7 +219,7 @@ export default function Home() {
     },
   ]);
   const [results, setResults] = useState<PanelResult[]>([]);
-  const [conclusion, setConclusion] = useState("");
+  const [memoryHistory, setMemoryHistory] = useState<ChatMessage[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -183,11 +228,37 @@ export default function Home() {
     [activeDay],
   );
 
+  useEffect(() => {
+    if (activeDay !== "day7") {
+      return;
+    }
+
+    let cancelled = false;
+    loadMemoryHistory()
+      .then((history) => {
+        if (!cancelled) {
+          setMemoryHistory(history);
+        }
+      })
+      .catch((historyError) => {
+        if (!cancelled) {
+          setError(
+            historyError instanceof Error
+              ? historyError.message
+              : "Failed to load memory history.",
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDay]);
+
   function switchDay(day: DayKey) {
     setActiveDay(day);
     setPrompt(defaultPrompts[day]);
     setResults([]);
-    setConclusion("");
     setError("");
   }
 
@@ -196,7 +267,6 @@ export default function Home() {
     setLoading(true);
     setError("");
     setResults([]);
-    setConclusion("");
 
     try {
       if (activeDay === "day1") {
@@ -324,6 +394,15 @@ Solve the task as a group of experts:
           model: model || undefined,
         });
         setResults([{ title: "SimpleAgent response", ...result }]);
+      }
+
+      if (activeDay === "day7") {
+        const result = await runMemoryAgent({
+          prompt,
+          model: model || undefined,
+        });
+        setMemoryHistory(result.history);
+        setResults([{ title: "MemoryAgent response", ...result }]);
       }
     } catch (requestError) {
       setError(
@@ -493,20 +572,31 @@ Solve the task as a group of experts:
             </div>
           )}
 
-          {results.length > 0 && activeDay !== "day6" && (
-            <label className="conclusion">
-              Short video conclusion
-              <textarea
-                onChange={(event) => setConclusion(event.target.value)}
-                placeholder="Capture which option worked best and why."
-                rows={4}
-                value={conclusion}
-              />
-            </label>
+          {activeDay === "day7" && memoryHistory.length > 0 && (
+            <ConversationHistory messages={memoryHistory} />
           )}
         </section>
       </section>
     </main>
+  );
+}
+
+function ConversationHistory({ messages }: { messages: ChatMessage[] }) {
+  return (
+    <section className="history-panel">
+      <div className="card-head">
+        <h3>Saved conversation history</h3>
+        <span>{messages.length} messages</span>
+      </div>
+      <div className="history-list">
+        {messages.map((message, index) => (
+          <article className="history-message" key={`${message.role}-${index}`}>
+            <strong>{message.role}</strong>
+            <pre>{message.content}</pre>
+          </article>
+        ))}
+      </div>
+    </section>
   );
 }
 
