@@ -11,7 +11,8 @@ type DayKey =
   | "day6"
   | "day7"
   | "day8"
-  | "day9";
+  | "day9"
+  | "day10";
 
 type Usage = {
   promptTokens: number | null;
@@ -70,6 +71,10 @@ type TokenDialog = {
   messages: ChatMessage[];
   metrics: TokenMetricRow[];
   summary?: string;
+  facts?: string[];
+  branch?: string;
+  branches?: string[];
+  strategy?: "sliding_window" | "sticky_facts" | "branching";
 };
 
 type TokenLabState = {
@@ -164,6 +169,7 @@ const days: Array<{ key: DayKey; label: string; title: string }> = [
   { key: "day7", label: "Day 7 Memory", title: "Persistent context" },
   { key: "day8", label: "Day 8 Tokens", title: "Token usage analysis" },
   { key: "day9", label: "Day 9 Compression", title: "History compression" },
+  { key: "day10", label: "Day 10 Strategies", title: "Context strategies" },
 ];
 
 const defaultPrompts: Record<DayKey, string> = {
@@ -182,6 +188,8 @@ const defaultPrompts: Record<DayKey, string> = {
     "Explain why token usage grows in a long LLM conversation. Keep the answer practical.",
   day9:
     "Using the previous dialog context, explain the main user goal and next best action.",
+  day10:
+    "Remember that this branch is about comparing context management strategies.",
 };
 
 async function runLlm(input: {
@@ -317,6 +325,44 @@ async function runCompressionAction(input: {
   return payload as TokenLabState;
 }
 
+async function loadStrategyLab() {
+  const response = await fetch("/api/agent/strategy");
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Failed to load strategy dialogs.");
+  }
+  return payload as TokenLabState;
+}
+
+async function runStrategyAction(input: {
+  action:
+    | "create_dialog"
+    | "delete_dialog"
+    | "send_message"
+    | "set_active_dialog"
+    | "rename_dialog"
+    | "set_strategy"
+    | "set_branch";
+  dialogId?: string;
+  title?: string;
+  prompt?: string;
+  model?: string;
+  strategy?: "sliding_window" | "sticky_facts" | "branching";
+  branch?: string;
+  recentMessages?: number;
+}) {
+  const response = await fetch("/api/agent/strategy", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Strategy dialog action failed.");
+  }
+  return payload as TokenLabState;
+}
+
 function formatTokens(value: number | null) {
   return value === null ? "n/a" : value.toLocaleString("en-US");
 }
@@ -393,6 +439,7 @@ export default function Home() {
   const [memoryHistory, setMemoryHistory] = useState<ChatMessage[]>([]);
   const [tokenLab, setTokenLab] = useState<TokenLabState | null>(null);
   const [compressionLab, setCompressionLab] = useState<TokenLabState | null>(null);
+  const [strategyLab, setStrategyLab] = useState<TokenLabState | null>(null);
   const [recentMessages, setRecentMessages] = useState("4");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -483,6 +530,33 @@ export default function Home() {
     };
   }, [activeDay]);
 
+  useEffect(() => {
+    if (activeDay !== "day10") {
+      return;
+    }
+
+    let cancelled = false;
+    loadStrategyLab()
+      .then((lab) => {
+        if (!cancelled) {
+          setStrategyLab(lab);
+        }
+      })
+      .catch((labError) => {
+        if (!cancelled) {
+          setError(
+            labError instanceof Error
+              ? labError.message
+              : "Failed to load strategy dialogs.",
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDay]);
+
   const activeTokenDialog = useMemo(() => {
     if (!tokenLab) {
       return null;
@@ -504,6 +578,17 @@ export default function Home() {
       ) ?? compressionLab.dialogs[0]
     );
   }, [compressionLab]);
+
+  const activeStrategyDialog = useMemo(() => {
+    if (!strategyLab) {
+      return null;
+    }
+    return (
+      strategyLab.dialogs.find(
+        (dialog) => dialog.id === strategyLab.activeDialogId,
+      ) ?? strategyLab.dialogs[0]
+    );
+  }, [strategyLab]);
 
   async function updateTokenLab(
     action: Parameters<typeof runTokenAction>[0],
@@ -623,6 +708,87 @@ export default function Home() {
     }
   }
 
+  async function updateStrategyLab(
+    action: Parameters<typeof runStrategyAction>[0],
+  ) {
+    setLoading(true);
+    setError("");
+    try {
+      const nextLab = await runStrategyAction(action);
+      setStrategyLab(nextLab);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Unexpected strategy dialog error.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function createStrategyDialog() {
+    void updateStrategyLab({ action: "create_dialog" });
+  }
+
+  function setActiveStrategyDialog(dialogId: string) {
+    void updateStrategyLab({ action: "set_active_dialog", dialogId });
+  }
+
+  function deleteStrategyDialog(dialog: TokenDialog) {
+    const confirmed = window.confirm(`Delete ${dialog.title}?`);
+    if (!confirmed) {
+      return;
+    }
+    void updateStrategyLab({ action: "delete_dialog", dialogId: dialog.id });
+  }
+
+  function renameStrategyDialog(dialog: TokenDialog) {
+    const title = window.prompt("Rename dialog", dialog.title)?.trim();
+    if (!title || title === dialog.title) {
+      return;
+    }
+    void updateStrategyLab({
+      action: "rename_dialog",
+      dialogId: dialog.id,
+      title,
+    });
+  }
+
+  function setStrategy(strategy: "sliding_window" | "sticky_facts" | "branching") {
+    void updateStrategyLab({ action: "set_strategy", strategy });
+  }
+
+  function setBranch(branch: string) {
+    void updateStrategyLab({ action: "set_branch", branch });
+  }
+
+  async function sendStrategyMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const nextLab = await runStrategyAction({
+        action: "send_message",
+        prompt,
+        model: model || undefined,
+        recentMessages: Number(recentMessages) || undefined,
+        strategy: activeStrategyDialog?.strategy ?? "sliding_window",
+        branch: activeStrategyDialog?.branch ?? "main",
+      });
+      setStrategyLab(nextLab);
+      setPrompt("");
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Unexpected strategy dialog error.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function sendTokenMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
@@ -652,12 +818,13 @@ export default function Home() {
     setResults([]);
     setTokenLab(null);
     setCompressionLab(null);
+    setStrategyLab(null);
     setError("");
   }
 
   async function runDay(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (activeDay === "day8" || activeDay === "day9") {
+    if (activeDay === "day8" || activeDay === "day9" || activeDay === "day10") {
       return;
     }
     setLoading(true);
@@ -665,6 +832,7 @@ export default function Home() {
     setResults([]);
     setTokenLab(null);
     setCompressionLab(null);
+    setStrategyLab(null);
 
     try {
       if (activeDay === "day1") {
@@ -840,12 +1008,12 @@ Solve the task as a group of experts:
 
       <section
         className={
-          activeDay === "day8" || activeDay === "day9"
+          activeDay === "day8" || activeDay === "day9" || activeDay === "day10"
             ? "workspace day8-workspace"
             : "workspace"
         }
       >
-        {activeDay !== "day8" && activeDay !== "day9" && (
+        {activeDay !== "day8" && activeDay !== "day9" && activeDay !== "day10" && (
         <form className="controls" onSubmit={runDay}>
           <div>
             <p className="eyebrow">Task</p>
@@ -961,7 +1129,7 @@ Solve the task as a group of experts:
         )}
 
         <section className="results">
-          {(activeDay === "day8" || activeDay === "day9") && error && (
+          {(activeDay === "day8" || activeDay === "day9" || activeDay === "day10") && error && (
             <p className="error">{error}</p>
           )}
           {activeDay === "day8" && tokenLab && (
@@ -999,11 +1167,33 @@ Solve the task as a group of experts:
               setRecentMessages={setRecentMessages}
             />
           )}
+          {activeDay === "day10" && strategyLab && (
+            <TokenLabView
+              activeDialog={activeStrategyDialog}
+              lab={strategyLab}
+              loading={loading}
+              model={model}
+              mode="strategy"
+              onBranchChange={setBranch}
+              onCreate={createStrategyDialog}
+              onDelete={deleteStrategyDialog}
+              onModelChange={setModel}
+              onRename={renameStrategyDialog}
+              onSelect={setActiveStrategyDialog}
+              onSend={sendStrategyMessage}
+              onStrategyChange={setStrategy}
+              prompt={prompt}
+              recentMessages={recentMessages}
+              setPrompt={setPrompt}
+              setRecentMessages={setRecentMessages}
+            />
+          )}
 
           {results.length === 0 &&
             !loading &&
             activeDay !== "day8" &&
-            activeDay !== "day9" && (
+            activeDay !== "day9" &&
+            activeDay !== "day10" && (
             <div className="empty">
               Select a day, review the prompt, and run the request. Answers and
               metrics will appear here.
@@ -1013,7 +1203,7 @@ Solve the task as a group of experts:
 
           {activeDay === "day5" && results.length > 0 ? (
             <DayFiveTable results={results} />
-          ) : activeDay === "day8" || activeDay === "day9" ? null : (
+          ) : activeDay === "day8" || activeDay === "day9" || activeDay === "day10" ? null : (
             <div className="result-grid">
               {results.map((result) => (
                 <ResultCard key={result.title} result={result} />
@@ -1143,12 +1333,14 @@ function TokenLabView({
   loading,
   model,
   mode = "tokens",
+  onBranchChange,
   onCreate,
   onDelete,
   onModelChange,
   onRename,
   onSelect,
   onSend,
+  onStrategyChange,
   prompt,
   recentMessages,
   setRecentMessages,
@@ -1158,13 +1350,15 @@ function TokenLabView({
   lab: TokenLabState;
   loading: boolean;
   model: string;
-  mode?: "tokens" | "compression";
+  mode?: "tokens" | "compression" | "strategy";
+  onBranchChange?: (branch: string) => void;
   onCreate: () => void;
   onDelete: (dialog: TokenDialog) => void;
   onModelChange: (value: string) => void;
   onRename: (dialog: TokenDialog) => void;
   onSelect: (dialogId: string) => void;
   onSend: (event: FormEvent<HTMLFormElement>) => void;
+  onStrategyChange?: (strategy: "sliding_window" | "sticky_facts" | "branching") => void;
   prompt: string;
   recentMessages?: string;
   setRecentMessages?: (value: string) => void;
@@ -1241,6 +1435,16 @@ function TokenLabView({
               <pre className="answer">{activeDialog.summary}</pre>
             </details>
           )}
+          {mode === "strategy" && activeDialog.facts && activeDialog.facts.length > 0 && (
+            <details open className="metrics-details">
+              <summary>Sticky facts</summary>
+              <ul className="fact-list">
+                {activeDialog.facts.map((fact) => (
+                  <li key={fact}>{fact}</li>
+                ))}
+              </ul>
+            </details>
+          )}
           <ConversationHistory messages={activeDialog.messages} />
           <form className="chat-composer" onSubmit={onSend}>
             <textarea
@@ -1291,6 +1495,55 @@ function TokenLabView({
                   />
                 </label>
               )}
+              {mode === "strategy" && onStrategyChange && (
+                <label>
+                  Strategy
+                  <select
+                    onChange={(event) =>
+                      onStrategyChange(
+                        event.target.value as
+                          | "sliding_window"
+                          | "sticky_facts"
+                          | "branching",
+                      )
+                    }
+                    value={activeDialog.strategy ?? "sliding_window"}
+                  >
+                    <option value="sliding_window">Sliding Window</option>
+                    <option value="sticky_facts">Sticky Facts</option>
+                    <option value="branching">Branching</option>
+                  </select>
+                </label>
+              )}
+              {mode === "strategy" && setRecentMessages && (
+                <label>
+                  Recent messages
+                  <input
+                    inputMode="numeric"
+                    onChange={(event) => setRecentMessages(event.target.value)}
+                    value={recentMessages ?? "6"}
+                  />
+                </label>
+              )}
+              {mode === "strategy" &&
+                activeDialog.strategy === "branching" &&
+                onBranchChange && (
+                  <label>
+                    Branch
+                    <select
+                      onChange={(event) => onBranchChange(event.target.value)}
+                      value={activeDialog.branch ?? "main"}
+                    >
+                      {(activeDialog.branches ?? ["main", "idea-a", "idea-b"]).map(
+                        (branch) => (
+                          <option key={branch} value={branch}>
+                            {branch}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                  </label>
+                )}
               <button className="run" disabled={loading} type="submit">
                 {loading ? "Sending..." : "Send"}
               </button>

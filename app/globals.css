@@ -444,6 +444,17 @@ textarea:focus {
   color: var(--accent-dark);
 }
 
+.fact-list {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding-left: 18px;
+}
+
+.fact-list li {
+  color: #344054;
+}
+
 .compression-panel {
   display: grid;
   gap: 14px;

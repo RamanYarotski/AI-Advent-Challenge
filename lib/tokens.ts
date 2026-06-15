@@ -25,6 +25,10 @@ export type TokenDialog = {
   messages: ChatMessage[];
   metrics: TokenMetricRow[];
   summary?: string;
+  facts?: string[];
+  branch?: string;
+  branches?: string[];
+  strategy?: "sliding_window" | "sticky_facts" | "branching";
 };
 
 export type TokenLabState = {
