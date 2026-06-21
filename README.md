@@ -2,32 +2,25 @@
 
 A Next.js + TypeScript playground for building an AI assistant step by step through the AI Advent Challenge.
 
-The project started as small isolated LLM experiments and is now evolving into one practical assistant. By Day 11, the main screen is a unified memory assistant that combines context compression, topic branches, and file-backed memory layers.
+The project started as small isolated LLM experiments and is now evolving into one practical assistant. Each day adds a visible feature and a small piece of agent architecture: API access, output control, reasoning, model evaluation, memory, token tracking, compression, branching, and file-backed long-term context.
 
 ## Current Stage
 
-Day 11 turns the previous demos into one agent product:
-
-- Short-term memory is stored as JSON with dialogs, topic branches, branch summaries, recent messages, and compact metrics.
-- Working memory is an editable Markdown file for current task and project facts.
-- Long-term memory is an editable Markdown file for stable user preferences and reusable rules.
-- The assistant chooses the relevant topic branch automatically.
-- The main prompt uses only the relevant branch summary, recent branch messages, working memory, and long-term memory.
-- Clear memory updates are saved automatically; ambiguous updates trigger a concise confirmation question.
+The current build is a unified assistant with automatic topic branches, context compression, compact metrics, and file-backed memory. The main prompt is assembled from the relevant branch summary, recent messages, working memory, and long-term memory.
 
 ## Progress
 
-- Day 1: first OpenAI-compatible LLM API request.
-- Day 2: response format controls.
-- Day 3: reasoning strategy comparison.
-- Day 4: temperature comparison.
-- Day 5: weak, medium, and strong model comparison.
-- Day 6: first simple agent.
-- Day 7: persistent conversation memory.
-- Day 8: token and cost analysis for chat dialogs.
-- Day 9: context compression with summaries.
-- Day 10: context strategies and topic branching.
-- Day 11: unified assistant with file-backed memory layers, automatic branch selection, compact metrics, and editable memory files.
+- Day 1: built the baseline OpenAI-compatible API request flow and proved the app can call an external LLM provider from a clean Next.js UI.
+- Day 2: added response-format controls to compare free-form answers with constrained output, including token limits and stop sequences.
+- Day 3: compared reasoning patterns for the same task, including direct answering, step-by-step reasoning, generated prompts, and expert-style roles.
+- Day 4: analyzed temperature as a model behavior lever by running the same prompt across deterministic and more creative settings.
+- Day 5: compared weak, medium, and strong models by quality, latency, token usage, and provider cost to make model choice visible.
+- Day 6: introduced a first agent loop with a system role and traceable execution, moving from raw chat calls toward agent behavior.
+- Day 7: added persistent conversation memory so the assistant can reuse prior context across turns instead of treating each request as isolated.
+- Day 8: built a chat lab for token and cost analysis, making context growth measurable across multi-turn dialogs.
+- Day 9: added context compression, where older messages are summarized and recent messages stay live in the prompt.
+- Day 10: explored context strategies under the hood, including sliding windows, sticky facts, and branch-based topic separation.
+- Day 11: merged compression, branching, and memory layers into the main assistant with editable JSON/Markdown-backed memory files.
 
 ## Run Locally
 
