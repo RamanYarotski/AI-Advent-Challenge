@@ -77,15 +77,6 @@ textarea {
   padding: 10px 12px;
 }
 
-.day-picker {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  margin-bottom: 16px;
-  max-width: 420px;
-  padding: 14px;
-}
-
 .workspace {
   align-items: start;
   display: grid;
@@ -94,6 +85,10 @@ textarea {
 }
 
 .day8-workspace {
+  grid-template-columns: 1fr;
+}
+
+.current-workspace {
   grid-template-columns: 1fr;
 }
 
@@ -300,8 +295,11 @@ textarea:focus {
   border-bottom: 1px solid var(--line);
   display: flex;
   gap: 6px;
+  max-width: 100%;
   overflow-x: auto;
+  overflow-y: hidden;
   padding-top: 2px;
+  scrollbar-width: thin;
 }
 
 .dialog-tab {
@@ -311,7 +309,9 @@ textarea:focus {
   border-bottom: 0;
   border-radius: 7px 7px 0 0;
   display: flex;
-  min-width: 118px;
+  flex: 0 0 auto;
+  max-width: 230px;
+  min-width: 132px;
 }
 
 .dialog-tab.active {
@@ -332,8 +332,12 @@ textarea:focus {
   color: #344054;
   flex: 1;
   font-weight: 800;
+  min-width: 0;
+  overflow: hidden;
   padding: 10px 8px;
   text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dialog-tab.active .tab-select {
@@ -343,7 +347,7 @@ textarea:focus {
 .tab-close {
   color: var(--muted);
   font-weight: 900;
-  padding: 10px 9px;
+  padding: 10px 8px;
 }
 
 .tab-close:hover {
@@ -352,10 +356,10 @@ textarea:focus {
 
 .tab-rename {
   color: var(--accent-dark);
-  font-size: 11px;
+  font-size: 16px;
   font-weight: 800;
-  padding: 10px 5px;
-  text-transform: uppercase;
+  line-height: 1;
+  padding: 10px 6px;
 }
 
 .tab-rename:hover {
@@ -366,10 +370,13 @@ textarea:focus {
   background: var(--accent);
   border-radius: 6px 6px 0 0;
   color: #fff;
+  flex: 0 0 auto;
   font-size: 20px;
   font-weight: 900;
   min-width: 42px;
   padding: 8px 12px;
+  position: sticky;
+  right: 0;
 }
 
 .chat-composer {
@@ -402,6 +409,12 @@ textarea:focus {
   gap: 6px;
 }
 
+.context-usage.compact {
+  align-self: center;
+  gap: 4px;
+  min-width: 190px;
+}
+
 .context-usage div:first-child {
   align-items: center;
   display: flex;
@@ -420,10 +433,16 @@ textarea:focus {
   font-size: 12px;
 }
 
+.context-usage.compact > span {
+  color: #475467;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .context-bar {
   background: #e8edf3;
   border-radius: 999px;
-  height: 10px;
+  height: 6px;
   overflow: hidden;
 }
 
@@ -431,6 +450,186 @@ textarea:focus {
   background: var(--accent);
   display: block;
   height: 100%;
+}
+
+.memory-lab {
+  gap: 16px;
+}
+
+.memory-composer-controls {
+  grid-template-columns: minmax(240px, 1.2fr) minmax(190px, 0.8fr) auto;
+}
+
+.memory-layer-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.memory-layer-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+}
+
+.memory-layer-head {
+  display: grid;
+  gap: 10px;
+}
+
+.memory-layer-head h3 {
+  color: #101828;
+  font-size: 16px;
+  margin: 0 0 4px;
+}
+
+.memory-layer-head p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+  margin: 0;
+}
+
+.memory-layer-head label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  gap: 5px;
+  text-transform: uppercase;
+}
+
+.memory-file-path {
+  background: #f8fafc;
+  border: 1px solid #e8edf3;
+  border-radius: 8px;
+  display: grid;
+  gap: 5px;
+  padding: 9px;
+}
+
+.memory-file-path span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.memory-file-path code {
+  color: #344054;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.memory-layer-head select {
+  font-size: 13px;
+  min-height: 34px;
+  padding: 7px 8px;
+  text-transform: none;
+}
+
+.memory-empty {
+  background: #f8fafc;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 12px;
+}
+
+.memory-note-list {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  max-height: 230px;
+  overflow: auto;
+  padding: 0;
+}
+
+.memory-note-list li {
+  background: #f8fafc;
+  border: 1px solid #e8edf3;
+  border-radius: 8px;
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+}
+
+.memory-note-list span {
+  color: #344054;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.memory-note-list small,
+.storage-summary {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.storage-summary {
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.branch-summary,
+.metrics-summary {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #344054;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+  gap: 8px 14px;
+  justify-content: space-between;
+  padding: 9px 12px;
+}
+
+.branch-summary span,
+.metrics-summary span {
+  overflow-wrap: anywhere;
+}
+
+.metrics-summary strong {
+  color: var(--accent-dark);
+}
+
+.memory-file-settings {
+  padding: 12px;
+}
+
+.memory-file-grid {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(150px, 1fr)) auto;
+  margin-top: 10px;
+}
+
+.memory-folder-field {
+  grid-column: 1 / -1;
+}
+
+.memory-file-apply {
+  min-width: 120px;
+}
+
+.memory-path-list {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  gap: 4px;
+  margin-top: 10px;
+  overflow-wrap: anywhere;
 }
 
 .metrics-details {
@@ -698,5 +897,17 @@ td pre {
 
   .composer-controls {
     grid-template-columns: 1fr;
+  }
+
+  .memory-layer-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .memory-file-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .context-usage.compact > span {
+    white-space: normal;
   }
 }

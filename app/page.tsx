@@ -12,7 +12,8 @@ type DayKey =
   | "day7"
   | "day8"
   | "day9"
-  | "day10";
+  | "day10"
+  | "day11";
 
 type Usage = {
   promptTokens: number | null;
@@ -80,6 +81,67 @@ type TokenDialog = {
 type TokenLabState = {
   activeDialogId: string;
   dialogs: TokenDialog[];
+};
+
+type MemoryLayerKey = "shortTerm" | "working" | "longTerm";
+
+type MemoryFileSettings = {
+  memoryFolder: string;
+  shortTermFileName: string;
+  workingMemoryFileName: string;
+  longTermMemoryFileName: string;
+};
+
+type MemoryFilePaths = {
+  shortTerm: string;
+  working: string;
+  longTerm: string;
+  index: string;
+};
+
+type MemoryLayerNote = {
+  id: string;
+  text: string;
+  source: string;
+  createdAt: string;
+};
+
+type MemoryLayerEvent = {
+  layer: MemoryLayerKey;
+  action:
+    | "saved"
+    | "skipped"
+    | "needs_confirmation"
+    | "selected_branch"
+    | "created_branch"
+    | "updated_summary"
+    | "prompt_context";
+  detail: string;
+  filePath: string;
+};
+
+type MemoryBranch = {
+  id: string;
+  title: string;
+  summary: string;
+  messages: ChatMessage[];
+  updatedAt: string;
+};
+
+type MemoryDialog = Omit<TokenDialog, "branches"> & {
+  activeBranchId: string;
+  branches: MemoryBranch[];
+  compactMetricsSummary: string;
+  pendingConfirmation: string | null;
+};
+
+type MemoryLayersState = {
+  activeDialogId: string;
+  dialogs: MemoryDialog[];
+  workingMemory: MemoryLayerNote[];
+  longTermMemory: MemoryLayerNote[];
+  fileSettings: MemoryFileSettings;
+  filePaths: MemoryFilePaths;
 };
 
 type ModelOption = {
@@ -170,6 +232,7 @@ const days: Array<{ key: DayKey; label: string; title: string }> = [
   { key: "day8", label: "Day 8 Tokens", title: "Token usage analysis" },
   { key: "day9", label: "Day 9 Compression", title: "History compression" },
   { key: "day10", label: "Day 10 Strategies", title: "Context strategies" },
+  { key: "day11", label: "Day 11 Memory", title: "Memory layers" },
 ];
 
 const defaultPrompts: Record<DayKey, string> = {
@@ -190,6 +253,8 @@ const defaultPrompts: Record<DayKey, string> = {
     "Using the previous dialog context, explain the main user goal and next best action.",
   day10:
     "Remember that this branch is about comparing context management strategies.",
+  day11:
+    "Remember this project decision: the Day 11 assistant should keep UI text in English and hide low-level context strategies from users.",
 };
 
 async function runLlm(input: {
@@ -363,6 +428,44 @@ async function runStrategyAction(input: {
   return payload as TokenLabState;
 }
 
+async function loadMemoryLayersLab() {
+  const response = await fetch("/api/agent/memory-layers");
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Failed to load memory layers.");
+  }
+  return payload as MemoryLayersState;
+}
+
+async function runMemoryLayersAction(input: {
+  action:
+    | "create_dialog"
+    | "delete_dialog"
+    | "send_message"
+    | "set_active_dialog"
+    | "rename_dialog"
+    | "set_file_settings";
+  dialogId?: string;
+  title?: string;
+  prompt?: string;
+  model?: string;
+  fileSettings?: Partial<MemoryFileSettings>;
+}) {
+  const response = await fetch("/api/agent/memory-layers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Memory layers action failed.");
+  }
+  return payload as MemoryLayersState & {
+    events?: MemoryLayerEvent[];
+    recentMessageCount?: number;
+  };
+}
+
 function formatTokens(value: number | null) {
   return value === null ? "n/a" : value.toLocaleString("en-US");
 }
@@ -408,8 +511,8 @@ function formatCost(value: number | null | undefined) {
 }
 
 export default function Home() {
-  const [activeDay, setActiveDay] = useState<DayKey>("day1");
-  const [prompt, setPrompt] = useState(defaultPrompts.day1);
+  const [activeDay] = useState<DayKey>("day11");
+  const [prompt, setPrompt] = useState(defaultPrompts.day11);
   const [model, setModel] = useState(defaultModel);
   const [formatInstruction, setFormatInstruction] = useState(
     "Return JSON with the fields summary, bullets, and final_marker.",
@@ -440,6 +543,9 @@ export default function Home() {
   const [tokenLab, setTokenLab] = useState<TokenLabState | null>(null);
   const [compressionLab, setCompressionLab] = useState<TokenLabState | null>(null);
   const [strategyLab, setStrategyLab] = useState<TokenLabState | null>(null);
+  const [memoryLayersLab, setMemoryLayersLab] =
+    useState<MemoryLayersState | null>(null);
+  const [memoryLayerEvents, setMemoryLayerEvents] = useState<MemoryLayerEvent[]>([]);
   const [recentMessages, setRecentMessages] = useState("4");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -557,6 +663,33 @@ export default function Home() {
     };
   }, [activeDay]);
 
+  useEffect(() => {
+    if (activeDay !== "day11") {
+      return;
+    }
+
+    let cancelled = false;
+    loadMemoryLayersLab()
+      .then((lab) => {
+        if (!cancelled) {
+          setMemoryLayersLab(lab);
+        }
+      })
+      .catch((labError) => {
+        if (!cancelled) {
+          setError(
+            labError instanceof Error
+              ? labError.message
+              : "Failed to load memory layers.",
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDay]);
+
   const activeTokenDialog = useMemo(() => {
     if (!tokenLab) {
       return null;
@@ -589,6 +722,17 @@ export default function Home() {
       ) ?? strategyLab.dialogs[0]
     );
   }, [strategyLab]);
+
+  const activeMemoryLayersDialog = useMemo(() => {
+    if (!memoryLayersLab) {
+      return null;
+    }
+    return (
+      memoryLayersLab.dialogs.find(
+        (dialog) => dialog.id === memoryLayersLab.activeDialogId,
+      ) ?? memoryLayersLab.dialogs[0]
+    );
+  }, [memoryLayersLab]);
 
   async function updateTokenLab(
     action: Parameters<typeof runTokenAction>[0],
@@ -789,6 +933,87 @@ export default function Home() {
     }
   }
 
+  async function updateMemoryLayersLab(
+    action: Parameters<typeof runMemoryLayersAction>[0],
+  ) {
+    setLoading(true);
+    setError("");
+    try {
+      const nextLab = await runMemoryLayersAction(action);
+      setMemoryLayersLab(nextLab);
+      if (nextLab.events) {
+        setMemoryLayerEvents(nextLab.events);
+      }
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Unexpected memory layers error.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function createMemoryLayersDialog() {
+    void updateMemoryLayersLab({ action: "create_dialog" });
+  }
+
+  function setActiveMemoryLayersDialog(dialogId: string) {
+    void updateMemoryLayersLab({ action: "set_active_dialog", dialogId });
+  }
+
+  function deleteMemoryLayersDialog(dialog: MemoryDialog) {
+    const confirmed = window.confirm(`Delete ${dialog.title}?`);
+    if (!confirmed) {
+      return;
+    }
+    void updateMemoryLayersLab({ action: "delete_dialog", dialogId: dialog.id });
+  }
+
+  function renameMemoryLayersDialog(dialog: MemoryDialog) {
+    const title = window.prompt("Rename dialog", dialog.title)?.trim();
+    if (!title || title === dialog.title) {
+      return;
+    }
+    void updateMemoryLayersLab({
+      action: "rename_dialog",
+      dialogId: dialog.id,
+      title,
+    });
+  }
+
+  function updateMemoryFileSettings(fileSettings: Partial<MemoryFileSettings>) {
+    void updateMemoryLayersLab({
+      action: "set_file_settings",
+      fileSettings,
+    });
+  }
+
+  async function sendMemoryLayersMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const nextLab = await runMemoryLayersAction({
+        action: "send_message",
+        prompt,
+        model: model || undefined,
+      });
+      setMemoryLayersLab(nextLab);
+      setMemoryLayerEvents(nextLab.events ?? []);
+      setPrompt("");
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Unexpected memory layers error.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function sendTokenMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
@@ -812,19 +1037,14 @@ export default function Home() {
     }
   }
 
-  function switchDay(day: DayKey) {
-    setActiveDay(day);
-    setPrompt(defaultPrompts[day]);
-    setResults([]);
-    setTokenLab(null);
-    setCompressionLab(null);
-    setStrategyLab(null);
-    setError("");
-  }
-
   async function runDay(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (activeDay === "day8" || activeDay === "day9" || activeDay === "day10") {
+    if (
+      activeDay === "day8" ||
+      activeDay === "day9" ||
+      activeDay === "day10" ||
+      activeDay === "day11"
+    ) {
       return;
     }
     setLoading(true);
@@ -833,6 +1053,7 @@ export default function Home() {
     setTokenLab(null);
     setCompressionLab(null);
     setStrategyLab(null);
+    setMemoryLayersLab(null);
 
     try {
       if (activeDay === "day1") {
@@ -987,33 +1208,16 @@ Solve the task as a group of experts:
       <section className="topbar">
         <div>
           <p className="eyebrow">AI Advent Challenge</p>
-          <h1>LLM API Practice</h1>
+          <h1>Memory Layer Assistant</h1>
         </div>
         <div className="status">OpenAI-compatible API</div>
       </section>
 
-      <label className="day-picker">
-        Day
-        <select
-          onChange={(event) => switchDay(event.target.value as DayKey)}
-          value={activeDay}
-        >
-          {days.map((day) => (
-            <option key={day.key} value={day.key}>
-              {day.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <section
-        className={
-          activeDay === "day8" || activeDay === "day9" || activeDay === "day10"
-            ? "workspace day8-workspace"
-            : "workspace"
-        }
-      >
-        {activeDay !== "day8" && activeDay !== "day9" && activeDay !== "day10" && (
+      <section className="workspace current-workspace">
+        {activeDay !== "day8" &&
+          activeDay !== "day9" &&
+          activeDay !== "day10" &&
+          activeDay !== "day11" && (
         <form className="controls" onSubmit={runDay}>
           <div>
             <p className="eyebrow">Task</p>
@@ -1129,7 +1333,10 @@ Solve the task as a group of experts:
         )}
 
         <section className="results">
-          {(activeDay === "day8" || activeDay === "day9" || activeDay === "day10") && error && (
+          {(activeDay === "day8" ||
+            activeDay === "day9" ||
+            activeDay === "day10" ||
+            activeDay === "day11") && error && (
             <p className="error">{error}</p>
           )}
           {activeDay === "day8" && tokenLab && (
@@ -1188,12 +1395,31 @@ Solve the task as a group of experts:
               setRecentMessages={setRecentMessages}
             />
           )}
+          {activeDay === "day11" && memoryLayersLab && (
+            <MemoryLayersView
+              activeDialog={activeMemoryLayersDialog}
+              events={memoryLayerEvents}
+              lab={memoryLayersLab}
+              loading={loading}
+              model={model}
+              onCreate={createMemoryLayersDialog}
+              onDelete={deleteMemoryLayersDialog}
+              onModelChange={setModel}
+              onRename={renameMemoryLayersDialog}
+              onSelect={setActiveMemoryLayersDialog}
+              onSend={sendMemoryLayersMessage}
+              onFileSettingsSubmit={updateMemoryFileSettings}
+              prompt={prompt}
+              setPrompt={setPrompt}
+            />
+          )}
 
           {results.length === 0 &&
             !loading &&
             activeDay !== "day8" &&
             activeDay !== "day9" &&
-            activeDay !== "day10" && (
+            activeDay !== "day10" &&
+            activeDay !== "day11" && (
             <div className="empty">
               Select a day, review the prompt, and run the request. Answers and
               metrics will appear here.
@@ -1203,7 +1429,10 @@ Solve the task as a group of experts:
 
           {activeDay === "day5" && results.length > 0 ? (
             <DayFiveTable results={results} />
-          ) : activeDay === "day8" || activeDay === "day9" || activeDay === "day10" ? null : (
+          ) : activeDay === "day8" ||
+            activeDay === "day9" ||
+            activeDay === "day10" ||
+            activeDay === "day11" ? null : (
             <div className="result-grid">
               {results.map((result) => (
                 <ResultCard key={result.title} result={result} />
@@ -1327,6 +1556,342 @@ function CostGraph({
   );
 }
 
+function MemoryLayerPanel({
+  title,
+  description,
+  notes,
+  filePath,
+}: {
+  title: string;
+  description: string;
+  notes: MemoryLayerNote[];
+  filePath: string;
+}) {
+  return (
+    <article className="memory-layer-card">
+      <div className="memory-layer-head">
+        <div>
+          <h3>{title}</h3>
+          <p>{description}</p>
+        </div>
+        <div className="memory-file-path">
+          <span>File</span>
+          <code>{filePath}</code>
+        </div>
+      </div>
+      {notes.length === 0 ? (
+        <div className="memory-empty">No saved items yet.</div>
+      ) : (
+        <ul className="memory-note-list">
+          {notes.map((note) => (
+            <li key={note.id}>
+              <span>{note.text}</span>
+              <small>{note.source}</small>
+            </li>
+          ))}
+        </ul>
+      )}
+    </article>
+  );
+}
+
+function MemoryFileSettingsForm({
+  filePaths,
+  initialSettings,
+  loading,
+  onSubmit,
+}: {
+  filePaths: MemoryFilePaths;
+  initialSettings: MemoryFileSettings;
+  loading: boolean;
+  onSubmit: (settings: Partial<MemoryFileSettings>) => void;
+}) {
+  const [draft, setDraft] = useState(initialSettings);
+
+  function updateField<K extends keyof MemoryFileSettings>(
+    key: K,
+    value: MemoryFileSettings[K],
+  ) {
+    setDraft({ ...draft, [key]: value });
+  }
+
+  return (
+    <details className="metrics-details memory-file-settings" open>
+      <summary>Memory files</summary>
+      <div className="memory-file-grid">
+        <label className="memory-folder-field">
+          Memory folder
+          <input
+            onChange={(event) => updateField("memoryFolder", event.target.value)}
+            value={draft.memoryFolder}
+          />
+        </label>
+        <label>
+          Short-term JSON
+          <input
+            onChange={(event) =>
+              updateField("shortTermFileName", event.target.value)
+            }
+            value={draft.shortTermFileName}
+          />
+        </label>
+        <label>
+          Working memory MD
+          <input
+            onChange={(event) =>
+              updateField("workingMemoryFileName", event.target.value)
+            }
+            value={draft.workingMemoryFileName}
+          />
+        </label>
+        <label>
+          Long-term memory MD
+          <input
+            onChange={(event) =>
+              updateField("longTermMemoryFileName", event.target.value)
+            }
+            value={draft.longTermMemoryFileName}
+          />
+        </label>
+        <button
+          className="run memory-file-apply"
+          disabled={loading}
+          onClick={() => onSubmit(draft)}
+          type="button"
+        >
+          Apply files
+        </button>
+      </div>
+      <div className="memory-path-list">
+        <span>Short-term: {filePaths.shortTerm}</span>
+        <span>Working: {filePaths.working}</span>
+        <span>Long-term: {filePaths.longTerm}</span>
+      </div>
+    </details>
+  );
+}
+
+function MemoryLayersView({
+  activeDialog,
+  events,
+  lab,
+  loading,
+  model,
+  onCreate,
+  onDelete,
+  onModelChange,
+  onRename,
+  onSelect,
+  onSend,
+  onFileSettingsSubmit,
+  prompt,
+  setPrompt,
+}: {
+  activeDialog: MemoryDialog | null;
+  events: MemoryLayerEvent[];
+  lab: MemoryLayersState;
+  loading: boolean;
+  model: string;
+  onCreate: () => void;
+  onDelete: (dialog: MemoryDialog) => void;
+  onModelChange: (value: string) => void;
+  onRename: (dialog: MemoryDialog) => void;
+  onSelect: (dialogId: string) => void;
+  onSend: (event: FormEvent<HTMLFormElement>) => void;
+  onFileSettingsSubmit: (settings: Partial<MemoryFileSettings>) => void;
+  prompt: string;
+  setPrompt: (value: string) => void;
+}) {
+  const rows = activeDialog?.metrics ?? [];
+  const lastMetricRow = rows[rows.length - 1];
+  const activeBranch = activeDialog?.branches.find(
+    (branch) => branch.id === activeDialog.activeBranchId,
+  );
+  const modelOption = getModelOption(model);
+  const contextLimit = modelOption?.contextWindowTokens ?? 128000;
+  const usedContextTokens =
+    lastMetricRow?.contextTokens ??
+    (activeDialog ? estimateUiMessageTokens(activeDialog.messages) : 0);
+  const contextPercent = Math.min(
+    100,
+    Math.round((usedContextTokens / contextLimit) * 1000) / 10,
+  );
+  const shortTermNotes =
+    activeDialog?.messages
+      .filter((message) => message.role !== "system")
+      .slice(-8)
+      .map((message, index) => ({
+        id: `short-${index}`,
+        text: `${message.role}: ${message.content}`,
+        source: "automatic recent dialog window",
+        createdAt: "",
+      })) ?? [];
+
+  return (
+    <section className="token-lab memory-lab">
+      <div className="dialog-tabs" aria-label="Memory layer dialogs">
+        {lab.dialogs.map((dialog) => (
+          <div
+            className={
+              dialog.id === lab.activeDialogId
+                ? "dialog-tab active"
+                : "dialog-tab"
+            }
+            key={dialog.id}
+          >
+            <button
+              className="tab-select"
+              onClick={() => onSelect(dialog.id)}
+              title={dialog.title}
+              type="button"
+            >
+              {dialog.title}
+            </button>
+            <button
+              aria-label={`Rename ${dialog.title}`}
+              className="tab-rename"
+              onClick={(event) => {
+                event.stopPropagation();
+                onRename(dialog);
+              }}
+              title="Rename dialog"
+              type="button"
+            >
+              {"\u270e"}
+            </button>
+            <button
+              aria-label={`Delete ${dialog.title}`}
+              className="tab-close"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDelete(dialog);
+              }}
+              title="Delete dialog"
+              type="button"
+            >
+              x
+            </button>
+          </div>
+        ))}
+        <button className="dialog-add" onClick={onCreate} type="button">
+          +
+        </button>
+      </div>
+
+      {!activeDialog ? (
+        <div className="empty">Create a dialog to start using memory layers.</div>
+      ) : (
+        <>
+          <MemoryFileSettingsForm
+            filePaths={lab.filePaths}
+            initialSettings={lab.fileSettings}
+            key={`${lab.fileSettings.memoryFolder}-${lab.fileSettings.shortTermFileName}-${lab.fileSettings.workingMemoryFileName}-${lab.fileSettings.longTermMemoryFileName}`}
+            loading={loading}
+            onSubmit={onFileSettingsSubmit}
+          />
+          <ConversationHistory messages={activeDialog.messages} />
+          <div className="branch-summary">
+            <span>Active topic: {activeBranch?.title ?? "Main topic"}</span>
+            <span>
+              {activeBranch?.summary
+                ? `Summary: ${activeBranch.summary}`
+                : "Summary: empty"}
+            </span>
+          </div>
+          <form className="chat-composer" onSubmit={onSend}>
+            <textarea
+              onChange={(event) => setPrompt(event.target.value)}
+              placeholder="Send a message. The assistant will decide which memory layer should be updated."
+              rows={4}
+              value={prompt}
+            />
+            <div className="composer-controls memory-composer-controls">
+              <label>
+                Model
+                <select
+                  onChange={(event) => onModelChange(event.target.value)}
+                  value={model}
+                >
+                  {modelGroups.map((group) => (
+                    <optgroup key={group.label} label={group.label}>
+                      {group.options.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label} - {option.value}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </label>
+              <div className="context-usage compact">
+                <span>
+                  Context: {formatTokens(usedContextTokens)} /{" "}
+                  {compactTokens(contextLimit)} · {contextPercent}%
+                </span>
+                <div className="context-bar" aria-label="Context usage">
+                  <span style={{ width: `${contextPercent}%` }} />
+                </div>
+              </div>
+              <button className="run" disabled={loading} type="submit">
+                {loading ? "Sending..." : "Send"}
+              </button>
+            </div>
+          </form>
+
+          <div className="memory-layer-grid">
+            <MemoryLayerPanel
+              description="Current dialog window, selected automatically."
+              filePath={lab.filePaths.shortTerm}
+              notes={shortTermNotes}
+              title="Short-term memory"
+            />
+            <MemoryLayerPanel
+              description="Current task facts, project decisions, and active work context."
+              filePath={lab.filePaths.working}
+              notes={lab.workingMemory}
+              title="Working memory"
+            />
+            <MemoryLayerPanel
+              description="Stable user preferences, reusable facts, and global knowledge."
+              filePath={lab.filePaths.longTerm}
+              notes={lab.longTermMemory}
+              title="Long-term memory"
+            />
+          </div>
+
+          <details open className="metrics-details">
+            <summary>Memory routing trace</summary>
+            {events.length === 0 ? (
+              <div className="empty">
+                Send a message to see how memory was routed.
+              </div>
+            ) : (
+              <ol className="trace-list">
+                {events.map((event, index) => (
+                  <li key={`${event.layer}-${event.action}-${index}`}>
+                    <strong>{event.layer}</strong>
+                    <span>{event.action}</span>
+                    <pre>{`${event.detail}\n${event.filePath}`}</pre>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </details>
+
+          <div className="metrics-summary">
+            <strong>Metrics</strong>
+            <span>{activeDialog.compactMetricsSummary}</span>
+          </div>
+          <div className="storage-summary">
+            File-backed document store: short-term dialog history is JSON;
+            working and long-term memory are editable Markdown files.
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 function TokenLabView({
   activeDialog,
   lab,
@@ -1397,6 +1962,18 @@ function TokenLabView({
               {dialog.title}
             </button>
             <button
+              aria-label={`Rename ${dialog.title}`}
+              className="tab-rename"
+              onClick={(event) => {
+                event.stopPropagation();
+                onRename(dialog);
+              }}
+              title="Rename dialog"
+              type="button"
+            >
+              {"\u270e"}
+            </button>
+            <button
               aria-label={`Delete ${dialog.title}`}
               className="tab-close"
               onClick={(event) => {
@@ -1406,17 +1983,6 @@ function TokenLabView({
               type="button"
             >
               x
-            </button>
-            <button
-              aria-label={`Rename ${dialog.title}`}
-              className="tab-rename"
-              onClick={(event) => {
-                event.stopPropagation();
-                onRename(dialog);
-              }}
-              type="button"
-            >
-              rename
             </button>
           </div>
         ))}
@@ -1471,19 +2037,14 @@ function TokenLabView({
                   ))}
                 </select>
               </label>
-              <div className="context-usage">
-                <div>
-                  <strong>Context usage</strong>
-                  <span>
-                    {formatTokens(usedContextTokens)} / {compactTokens(contextLimit)} tokens
-                  </span>
-                </div>
+              <div className="context-usage compact">
+                <span>
+                  Context: {formatTokens(usedContextTokens)} /{" "}
+                  {compactTokens(contextLimit)} · {contextPercent}%
+                </span>
                 <div className="context-bar" aria-label="Context usage">
                   <span style={{ width: `${contextPercent}%` }} />
                 </div>
-                <small>
-                  {contextPercent}% of OpenRouter max context for selected model
-                </small>
               </div>
               {mode === "compression" && setRecentMessages && (
                 <label>
