@@ -1,22 +1,49 @@
 # AI Advent Challenge
 
-Один локальный web-интерфейс для пяти заданий первой недели AI Advent Challenge.
+A Next.js + TypeScript playground for building an AI assistant step by step through the AI Advent Challenge.
 
-## Запуск
+The project started as small isolated LLM experiments and is now evolving into one practical assistant. By Day 11, the main screen is a unified memory assistant that combines context compression, topic branches, and file-backed memory layers.
 
-1. Установить зависимости:
+## Current Stage
+
+Day 11 turns the previous demos into one agent product:
+
+- Short-term memory is stored as JSON with dialogs, topic branches, branch summaries, recent messages, and compact metrics.
+- Working memory is an editable Markdown file for current task and project facts.
+- Long-term memory is an editable Markdown file for stable user preferences and reusable rules.
+- The assistant chooses the relevant topic branch automatically.
+- The main prompt uses only the relevant branch summary, recent branch messages, working memory, and long-term memory.
+- Clear memory updates are saved automatically; ambiguous updates trigger a concise confirmation question.
+
+## Progress
+
+- Day 1: first OpenAI-compatible LLM API request.
+- Day 2: response format controls.
+- Day 3: reasoning strategy comparison.
+- Day 4: temperature comparison.
+- Day 5: weak, medium, and strong model comparison.
+- Day 6: first simple agent.
+- Day 7: persistent conversation memory.
+- Day 8: token and cost analysis for chat dialogs.
+- Day 9: context compression with summaries.
+- Day 10: context strategies and topic branching.
+- Day 11: unified assistant with file-backed memory layers, automatic branch selection, compact metrics, and editable memory files.
+
+## Run Locally
+
+Install dependencies:
 
 ```bash
 npm install
 ```
 
-2. Создать `.env.local` по примеру:
+Create local environment variables:
 
 ```bash
 cp .env.example .env.local
 ```
 
-3. Заполнить ключ и модели:
+Configure an OpenAI-compatible provider, for example OpenRouter:
 
 ```bash
 OPENAI_COMPATIBLE_BASE_URL=https://openrouter.ai/api/v1
@@ -30,37 +57,21 @@ NEXT_PUBLIC_MODEL_MEDIUM=qwen/qwen3-32b
 NEXT_PUBLIC_MODEL_STRONG=qwen/qwen3-235b-a22b-thinking-2507
 ```
 
-4. Запустить приложение:
+Start the app:
 
 ```bash
 npm run dev
 ```
 
-Открыть `http://localhost:3000`.
+Open `http://localhost:3000`.
 
-## Что есть в проекте
+## Checks
 
-- `Day 1 API`: первый запрос к LLM через OpenAI-compatible API.
-- `Day 2 Format`: сравнение ответа без ограничений и с контролем формата.
-- `Day 3 Reasoning`: четыре способа рассуждения для одной задачи.
-- `Day 4 Temperature`: сравнение `temperature = 0`, `0.7`, `1.2`.
-- `Day 5 Models`: сравнение слабой, средней и сильной модели по качеству, скорости, токенам и стоимости.
-
-## Проверка перед видео
+Before committing a completed day:
 
 ```bash
 npm run lint
 npm run build
 ```
 
-Для видео достаточно показать выбранный день, prompt, запуск, ответы и метрики.
-
-## Коммиты
-
-По договоренности коммит делается после проверки каждого задания:
-
-- `day 1: add llm api chat baseline`
-- `day 2: add response format controls`
-- `day 3: add reasoning strategy comparison`
-- `day 4: add temperature comparison`
-- `day 5: add model version comparison`
+Do not commit `.env.local`, `.data`, `.next`, `node_modules`, or log files.
