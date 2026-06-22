@@ -13,7 +13,8 @@ type DayKey =
   | "day8"
   | "day9"
   | "day10"
-  | "day11";
+  | "day11"
+  | "day12";
 
 type Usage = {
   promptTokens: number | null;
@@ -32,6 +33,7 @@ type LlmResult = {
 type ChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
+  profileId?: string;
 };
 
 type AgentTrace = {
@@ -90,12 +92,14 @@ type MemoryFileSettings = {
   shortTermFileName: string;
   workingMemoryFileName: string;
   longTermMemoryFileName: string;
+  userProfilesFileName: string;
 };
 
 type MemoryFilePaths = {
   shortTerm: string;
   working: string;
   longTerm: string;
+  userProfiles: string;
   index: string;
 };
 
@@ -120,10 +124,56 @@ type MemoryLayerEvent = {
   filePath: string;
 };
 
+type UserProfile = {
+  id: string;
+  name: string;
+  roleContext: string;
+  style: string;
+  format: string;
+  constraints: string;
+  updatedAt: string;
+};
+
+type UserProfileField = "roleContext" | "style" | "format" | "constraints";
+
+type PendingProfileUpdate = {
+  id: string;
+  profileId: string;
+  field: UserProfileField;
+  value: string;
+  reason: string;
+  sourceText: string;
+  confidence: number;
+  createdAt: string;
+};
+
+type MemoryMetricTotals = {
+  turns: number;
+  requestTokens: number;
+  contextTokens: number;
+  responseTokens: number;
+  totalTokens: number;
+  elapsedMs: number;
+  providerCost: number;
+  hasProviderCost: boolean;
+};
+
+type RequestContextDebug = {
+  createdAt: string;
+  profile: UserProfile;
+  selectedBranchTitle: string;
+  selectedBranchSummary: string;
+  recentMessages: ChatMessage[];
+  workingMemory: MemoryLayerNote[];
+  longTermMemory: MemoryLayerNote[];
+  assembledMessages: ChatMessage[];
+};
+
 type MemoryBranch = {
   id: string;
   title: string;
   summary: string;
+  profileSummaries?: Record<string, string>;
   messages: ChatMessage[];
   updatedAt: string;
 };
@@ -140,6 +190,11 @@ type MemoryLayersState = {
   dialogs: MemoryDialog[];
   workingMemory: MemoryLayerNote[];
   longTermMemory: MemoryLayerNote[];
+  activeProfileId: string;
+  userProfiles: UserProfile[];
+  pendingProfileUpdates: PendingProfileUpdate[];
+  globalMetrics: MemoryMetricTotals;
+  lastRequestContext: RequestContextDebug | null;
   fileSettings: MemoryFileSettings;
   filePaths: MemoryFilePaths;
 };
@@ -233,6 +288,7 @@ const days: Array<{ key: DayKey; label: string; title: string }> = [
   { key: "day9", label: "Day 9 Compression", title: "History compression" },
   { key: "day10", label: "Day 10 Strategies", title: "Context strategies" },
   { key: "day11", label: "Day 11 Memory", title: "Memory layers" },
+  { key: "day12", label: "Day 12 Personalization", title: "Personalized assistant" },
 ];
 
 const defaultPrompts: Record<DayKey, string> = {
@@ -255,6 +311,8 @@ const defaultPrompts: Record<DayKey, string> = {
     "Remember that this branch is about comparing context management strategies.",
   day11:
     "Remember this project decision: the Day 11 assistant should keep UI text in English and hide low-level context strategies from users.",
+  day12:
+    "Explain how we should approach the next architecture decision in this assistant.",
 };
 
 async function runLlm(input: {
@@ -444,12 +502,26 @@ async function runMemoryLayersAction(input: {
     | "send_message"
     | "set_active_dialog"
     | "rename_dialog"
-    | "set_file_settings";
+    | "set_file_settings"
+    | "move_memory_folder"
+    | "create_profile"
+    | "rename_profile"
+    | "delete_profile"
+    | "set_active_profile"
+    | "update_profile"
+    | "apply_profile_update"
+    | "dismiss_profile_update"
+    | "apply_all_profile_updates"
+    | "dismiss_all_profile_updates";
   dialogId?: string;
   title?: string;
   prompt?: string;
   model?: string;
+  memoryFolder?: string;
   fileSettings?: Partial<MemoryFileSettings>;
+  profileId?: string;
+  profileUpdateId?: string;
+  profile?: Partial<UserProfile>;
 }) {
   const response = await fetch("/api/agent/memory-layers", {
     method: "POST",
@@ -511,8 +583,8 @@ function formatCost(value: number | null | undefined) {
 }
 
 export default function Home() {
-  const [activeDay] = useState<DayKey>("day11");
-  const [prompt, setPrompt] = useState(defaultPrompts.day11);
+  const [activeDay] = useState<DayKey>("day12");
+  const [prompt, setPrompt] = useState(defaultPrompts.day12);
   const [model, setModel] = useState(defaultModel);
   const [formatInstruction, setFormatInstruction] = useState(
     "Return JSON with the fields summary, bullets, and final_marker.",
@@ -664,7 +736,7 @@ export default function Home() {
   }, [activeDay]);
 
   useEffect(() => {
-    if (activeDay !== "day11") {
+    if (activeDay !== "day11" && activeDay !== "day12") {
       return;
     }
 
@@ -983,11 +1055,69 @@ export default function Home() {
     });
   }
 
-  function updateMemoryFileSettings(fileSettings: Partial<MemoryFileSettings>) {
+  function moveMemoryFolder(memoryFolder: string) {
     void updateMemoryLayersLab({
-      action: "set_file_settings",
-      fileSettings,
+      action: "move_memory_folder",
+      memoryFolder,
     });
+  }
+
+  function setActiveProfile(profileId: string) {
+    void updateMemoryLayersLab({
+      action: "set_active_profile",
+      profileId,
+    });
+  }
+
+  function createUserProfile(name: string) {
+    void updateMemoryLayersLab({
+      action: "create_profile",
+      title: name,
+    });
+  }
+
+  function renameUserProfile(profileId: string, name: string) {
+    void updateMemoryLayersLab({
+      action: "rename_profile",
+      profileId,
+      title: name,
+    });
+  }
+
+  function deleteUserProfile(profileId: string) {
+    void updateMemoryLayersLab({
+      action: "delete_profile",
+      profileId,
+    });
+  }
+
+  function updateUserProfile(profile: Partial<UserProfile> & { id: string }) {
+    void updateMemoryLayersLab({
+      action: "update_profile",
+      profile,
+    });
+  }
+
+  function applyProfileUpdate(profileUpdateId: string) {
+    void updateMemoryLayersLab({
+      action: "apply_profile_update",
+      profileUpdateId,
+    });
+  }
+
+  function dismissProfileUpdate(profileUpdateId: string) {
+    void updateMemoryLayersLab({
+      action: "dismiss_profile_update",
+      profileUpdateId,
+    });
+  }
+
+  function applyAllProfileUpdates(profileId: string) {
+    void updateMemoryLayersLab({ action: "apply_all_profile_updates", profileId });
+  }
+
+  function dismissAllProfileUpdates(profileId: string) {
+    void updateMemoryLayersLab({ action: "dismiss_all_profile_updates", profileId });
   }
 
   async function sendMemoryLayersMessage(event: FormEvent<HTMLFormElement>) {
@@ -1043,7 +1173,8 @@ export default function Home() {
       activeDay === "day8" ||
       activeDay === "day9" ||
       activeDay === "day10" ||
-      activeDay === "day11"
+      activeDay === "day11" ||
+      activeDay === "day12"
     ) {
       return;
     }
@@ -1217,7 +1348,8 @@ Solve the task as a group of experts:
         {activeDay !== "day8" &&
           activeDay !== "day9" &&
           activeDay !== "day10" &&
-          activeDay !== "day11" && (
+        activeDay !== "day11" &&
+          activeDay !== "day12" && (
         <form className="controls" onSubmit={runDay}>
           <div>
             <p className="eyebrow">Task</p>
@@ -1336,7 +1468,8 @@ Solve the task as a group of experts:
           {(activeDay === "day8" ||
             activeDay === "day9" ||
             activeDay === "day10" ||
-            activeDay === "day11") && error && (
+            activeDay === "day11" ||
+            activeDay === "day12") && error && (
             <p className="error">{error}</p>
           )}
           {activeDay === "day8" && tokenLab && (
@@ -1395,7 +1528,7 @@ Solve the task as a group of experts:
               setRecentMessages={setRecentMessages}
             />
           )}
-          {activeDay === "day11" && memoryLayersLab && (
+          {(activeDay === "day11" || activeDay === "day12") && memoryLayersLab && (
             <MemoryLayersView
               activeDialog={activeMemoryLayersDialog}
               events={memoryLayerEvents}
@@ -1408,7 +1541,16 @@ Solve the task as a group of experts:
               onRename={renameMemoryLayersDialog}
               onSelect={setActiveMemoryLayersDialog}
               onSend={sendMemoryLayersMessage}
-              onFileSettingsSubmit={updateMemoryFileSettings}
+              onMemoryFolderMove={moveMemoryFolder}
+              onProfileApplySuggestion={applyProfileUpdate}
+              onProfileApplySuggestions={applyAllProfileUpdates}
+              onProfileCreate={createUserProfile}
+              onProfileDelete={deleteUserProfile}
+              onProfileDismissSuggestion={dismissProfileUpdate}
+              onProfileDismissSuggestions={dismissAllProfileUpdates}
+              onProfileRename={renameUserProfile}
+              onProfileSelect={setActiveProfile}
+              onProfileUpdate={updateUserProfile}
               prompt={prompt}
               setPrompt={setPrompt}
             />
@@ -1419,7 +1561,8 @@ Solve the task as a group of experts:
             activeDay !== "day8" &&
             activeDay !== "day9" &&
             activeDay !== "day10" &&
-            activeDay !== "day11" && (
+            activeDay !== "day11" &&
+            activeDay !== "day12" && (
             <div className="empty">
               Select a day, review the prompt, and run the request. Answers and
               metrics will appear here.
@@ -1432,7 +1575,8 @@ Solve the task as a group of experts:
           ) : activeDay === "day8" ||
             activeDay === "day9" ||
             activeDay === "day10" ||
-            activeDay === "day11" ? null : (
+            activeDay === "day11" ||
+            activeDay === "day12" ? null : (
             <div className="result-grid">
               {results.map((result) => (
                 <ResultCard key={result.title} result={result} />
@@ -1604,71 +1748,579 @@ function MemoryFileSettingsForm({
   filePaths: MemoryFilePaths;
   initialSettings: MemoryFileSettings;
   loading: boolean;
-  onSubmit: (settings: Partial<MemoryFileSettings>) => void;
+  onSubmit: (memoryFolder: string) => void;
 }) {
-  const [draft, setDraft] = useState(initialSettings);
-
-  function updateField<K extends keyof MemoryFileSettings>(
-    key: K,
-    value: MemoryFileSettings[K],
-  ) {
-    setDraft({ ...draft, [key]: value });
-  }
+  const [draftFolder, setDraftFolder] = useState(initialSettings.memoryFolder);
 
   return (
-    <details className="metrics-details memory-file-settings" open>
-      <summary>Memory files</summary>
-      <div className="memory-file-grid">
+    <section className="settings-page">
+      <div className="settings-page-head">
+        <h3>Memory location</h3>
+        <p>Move the assistant memory files to another server-visible folder.</p>
+      </div>
+      <div className="memory-file-grid compact-settings">
         <label className="memory-folder-field">
           Memory folder
           <input
-            onChange={(event) => updateField("memoryFolder", event.target.value)}
-            value={draft.memoryFolder}
-          />
-        </label>
-        <label>
-          Short-term JSON
-          <input
-            onChange={(event) =>
-              updateField("shortTermFileName", event.target.value)
-            }
-            value={draft.shortTermFileName}
-          />
-        </label>
-        <label>
-          Working memory MD
-          <input
-            onChange={(event) =>
-              updateField("workingMemoryFileName", event.target.value)
-            }
-            value={draft.workingMemoryFileName}
-          />
-        </label>
-        <label>
-          Long-term memory MD
-          <input
-            onChange={(event) =>
-              updateField("longTermMemoryFileName", event.target.value)
-            }
-            value={draft.longTermMemoryFileName}
+            onChange={(event) => setDraftFolder(event.target.value)}
+            value={draftFolder}
           />
         </label>
         <button
           className="run memory-file-apply"
           disabled={loading}
-          onClick={() => onSubmit(draft)}
+          onClick={() => onSubmit(draftFolder)}
           type="button"
         >
-          Apply files
+          Move memory
         </button>
       </div>
       <div className="memory-path-list">
         <span>Short-term: {filePaths.shortTerm}</span>
         <span>Working: {filePaths.working}</span>
         <span>Long-term: {filePaths.longTerm}</span>
+        <span>Profiles: {filePaths.userProfiles}</span>
       </div>
-    </details>
+      <p className="settings-note">
+        File names are fixed. The move is blocked if a target memory file already exists.
+      </p>
+    </section>
   );
+}
+
+type SettingsSection = "profile" | "location" | "memory" | "metrics" | "context";
+
+function activeProfileFrom(lab: MemoryLayersState) {
+  return (
+    lab.userProfiles.find((profile) => profile.id === lab.activeProfileId) ??
+    lab.userProfiles[0]
+  );
+}
+
+function AssistantSettingsModal({
+  lab,
+  loading,
+  onClose,
+  onMemoryFolderMove,
+  onProfileApplySuggestion,
+  onProfileApplySuggestions,
+  onProfileCreate,
+  onProfileDelete,
+  onProfileDismissSuggestion,
+  onProfileDismissSuggestions,
+  onProfileRename,
+  onProfileSelect,
+  onProfileUpdate,
+}: {
+  lab: MemoryLayersState;
+  loading: boolean;
+  onClose: () => void;
+  onMemoryFolderMove: (memoryFolder: string) => void;
+  onProfileApplySuggestion: (profileUpdateId: string) => void;
+  onProfileApplySuggestions: (profileId: string) => void;
+  onProfileCreate: (name: string) => void;
+  onProfileDelete: (profileId: string) => void;
+  onProfileDismissSuggestion: (profileUpdateId: string) => void;
+  onProfileDismissSuggestions: (profileId: string) => void;
+  onProfileRename: (profileId: string, name: string) => void;
+  onProfileSelect: (profileId: string) => void;
+  onProfileUpdate: (profile: Partial<UserProfile> & { id: string }) => void;
+}) {
+  const [section, setSection] = useState<SettingsSection>("profile");
+  const activeProfile = activeProfileFrom(lab);
+  const sections: Array<{ id: SettingsSection; label: string }> = [
+    { id: "profile", label: "Profile" },
+    { id: "location", label: "Memory location" },
+    { id: "memory", label: "Saved memory" },
+    { id: "metrics", label: "Metrics" },
+    { id: "context", label: "Request context" },
+  ];
+
+  return (
+    <div className="settings-overlay" role="presentation">
+      <section
+        aria-label="Assistant settings"
+        aria-modal="true"
+        className="settings-modal"
+        role="dialog"
+      >
+        <aside className="settings-nav">
+          <div>
+            <p className="eyebrow">Settings</p>
+            <h2>Assistant</h2>
+          </div>
+          <nav aria-label="Settings sections">
+            {sections.map((item) => (
+              <button
+                className={section === item.id ? "active" : ""}
+                key={item.id}
+                onClick={() => setSection(item.id)}
+                type="button"
+              >
+                {item.label}
+              </button>
+            ))}
+          </nav>
+        </aside>
+        <div className="settings-content">
+          <button
+            aria-label="Close settings"
+            className="settings-close"
+            onClick={onClose}
+            type="button"
+          >
+            x
+          </button>
+          {section === "profile" && (
+            <ProfileSettingsPage
+              activeProfile={activeProfile}
+              key={`${activeProfile?.id ?? "no-profile"}-${activeProfile?.updatedAt ?? "no-update"}`}
+              loading={loading}
+              onProfileApplySuggestion={onProfileApplySuggestion}
+              onProfileApplySuggestions={onProfileApplySuggestions}
+              onProfileCreate={onProfileCreate}
+              onProfileDelete={onProfileDelete}
+              onProfileDismissSuggestion={onProfileDismissSuggestion}
+              onProfileDismissSuggestions={onProfileDismissSuggestions}
+              onProfileRename={onProfileRename}
+              onProfileSelect={onProfileSelect}
+              onProfileUpdate={onProfileUpdate}
+              pendingProfileUpdates={lab.pendingProfileUpdates}
+              profiles={lab.userProfiles}
+            />
+          )}
+          {section === "location" && (
+            <MemoryFileSettingsForm
+              filePaths={lab.filePaths}
+              initialSettings={lab.fileSettings}
+              key={lab.fileSettings.memoryFolder}
+              loading={loading}
+              onSubmit={onMemoryFolderMove}
+            />
+          )}
+          {section === "memory" && (
+            <SavedMemorySettingsPage lab={lab} />
+          )}
+          {section === "metrics" && (
+            <MetricsSettingsPage totals={lab.globalMetrics} />
+          )}
+          {section === "context" && (
+            <RequestContextSettingsPage context={lab.lastRequestContext} />
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ProfileSettingsPage({
+  activeProfile,
+  loading,
+  onProfileApplySuggestion,
+  onProfileApplySuggestions,
+  onProfileCreate,
+  onProfileDelete,
+  onProfileDismissSuggestion,
+  onProfileDismissSuggestions,
+  onProfileRename,
+  onProfileSelect,
+  onProfileUpdate,
+  pendingProfileUpdates,
+  profiles,
+}: {
+  activeProfile: UserProfile | undefined;
+  loading: boolean;
+  onProfileApplySuggestion: (profileUpdateId: string) => void;
+  onProfileApplySuggestions: (profileId: string) => void;
+  onProfileCreate: (name: string) => void;
+  onProfileDelete: (profileId: string) => void;
+  onProfileDismissSuggestion: (profileUpdateId: string) => void;
+  onProfileDismissSuggestions: (profileId: string) => void;
+  onProfileRename: (profileId: string, name: string) => void;
+  onProfileSelect: (profileId: string) => void;
+  onProfileUpdate: (profile: Partial<UserProfile> & { id: string }) => void;
+  pendingProfileUpdates: PendingProfileUpdate[];
+  profiles: UserProfile[];
+}) {
+  const [draft, setDraft] = useState<UserProfile | undefined>(activeProfile);
+
+  if (!draft) {
+    return <div className="empty">No profiles are available.</div>;
+  }
+  const currentProfile = draft;
+  const activeSuggestions = pendingProfileUpdates.filter(
+    (update) => update.profileId === currentProfile.id,
+  );
+
+  function updateField<K extends keyof UserProfile>(
+    key: K,
+    value: UserProfile[K],
+  ) {
+    setDraft((current) => (current ? { ...current, [key]: value } : current));
+  }
+
+  function createProfile() {
+    const name = window.prompt("New profile name")?.trim();
+    if (!name) {
+      return;
+    }
+    onProfileCreate(name);
+  }
+
+  function renameProfile() {
+    const name = window.prompt("Rename profile", currentProfile.name)?.trim();
+    if (!name || name === currentProfile.name) {
+      return;
+    }
+    onProfileRename(currentProfile.id, name);
+  }
+
+  function deleteProfile() {
+    const confirmed = window.confirm(`Delete ${currentProfile.name}?`);
+    if (!confirmed) {
+      return;
+    }
+    onProfileDelete(currentProfile.id);
+  }
+
+  return (
+    <section className="settings-page profile-settings">
+      <div className="settings-page-head">
+        <h3>User profile</h3>
+        <p>Personalization is applied to every assistant request.</p>
+      </div>
+      <label>
+        Active profile
+        <select
+          onChange={(event) => onProfileSelect(event.target.value)}
+          value={currentProfile.id}
+        >
+          {profiles.map((profile) => (
+            <option key={profile.id} value={profile.id}>
+              {profile.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="profile-toolbar">
+        <div>
+          <span>Selected profile</span>
+          <strong>{currentProfile.name}</strong>
+        </div>
+        <button
+          className="secondary-action"
+          disabled={loading}
+          onClick={createProfile}
+          type="button"
+        >
+          New
+        </button>
+        <button
+          className="secondary-action"
+          disabled={loading}
+          onClick={renameProfile}
+          type="button"
+        >
+          Rename
+        </button>
+        <button
+          className="danger-action"
+          disabled={loading}
+          onClick={deleteProfile}
+          type="button"
+        >
+          Delete
+        </button>
+      </div>
+      <label>
+        Role / context
+        <textarea
+          onChange={(event) => updateField("roleContext", event.target.value)}
+          rows={3}
+          value={currentProfile.roleContext}
+        />
+      </label>
+      <label>
+        Style
+        <textarea
+          onChange={(event) => updateField("style", event.target.value)}
+          rows={3}
+          value={currentProfile.style}
+        />
+      </label>
+      <label>
+        Format
+        <textarea
+          onChange={(event) => updateField("format", event.target.value)}
+          rows={3}
+          value={currentProfile.format}
+        />
+      </label>
+      <label>
+        Constraints
+        <textarea
+          onChange={(event) => updateField("constraints", event.target.value)}
+          rows={3}
+          value={currentProfile.constraints}
+        />
+      </label>
+      <div className="settings-actions">
+        <button
+          className="run"
+          disabled={loading}
+          onClick={() =>
+            onProfileUpdate({
+              id: currentProfile.id,
+              roleContext: currentProfile.roleContext,
+              style: currentProfile.style,
+              format: currentProfile.format,
+              constraints: currentProfile.constraints,
+            })
+          }
+          type="button"
+        >
+          Save preferences
+        </button>
+      </div>
+      <section className="profile-suggestions">
+        <div className="settings-page-head">
+          <h3>Suggested profile updates</h3>
+          <p>Explicit preferences found in the chat wait here until you apply them.</p>
+        </div>
+        {activeSuggestions.length === 0 ? (
+          <div className="memory-empty">No suggested profile updates yet.</div>
+        ) : (
+          <>
+            <div className="settings-actions">
+              <button
+                className="secondary-action"
+                disabled={loading}
+                onClick={() => onProfileApplySuggestions(currentProfile.id)}
+                type="button"
+              >
+                Apply all
+              </button>
+              <button
+                className="secondary-action"
+                disabled={loading}
+                onClick={() => onProfileDismissSuggestions(currentProfile.id)}
+                type="button"
+              >
+                Dismiss all
+              </button>
+            </div>
+            <div className="profile-suggestion-list">
+              {activeSuggestions.map((suggestion) => (
+                <article className="profile-suggestion" key={suggestion.id}>
+                  <div>
+                    <span>{profileFieldLabel(suggestion.field)}</span>
+                    <strong>{suggestion.value}</strong>
+                  </div>
+                  <p>{suggestion.reason || "Explicit user preference."}</p>
+                  <blockquote>{suggestion.sourceText}</blockquote>
+                  <small>
+                    Confidence {Math.round(suggestion.confidence * 100)}%
+                  </small>
+                  <div className="settings-actions">
+                    <button
+                      className="run"
+                      disabled={loading}
+                      onClick={() => onProfileApplySuggestion(suggestion.id)}
+                      type="button"
+                    >
+                      Apply
+                    </button>
+                    <button
+                      className="secondary-action"
+                      disabled={loading}
+                      onClick={() => onProfileDismissSuggestion(suggestion.id)}
+                      type="button"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </>
+        )}
+      </section>
+    </section>
+  );
+}
+
+function profileFieldLabel(field: UserProfileField) {
+  if (field === "roleContext") {
+    return "Role / context";
+  }
+  if (field === "style") {
+    return "Style";
+  }
+  if (field === "format") {
+    return "Format";
+  }
+  return "Constraints";
+}
+
+function SavedMemorySettingsPage({
+  lab,
+}: {
+  lab: MemoryLayersState;
+}) {
+  return (
+    <section className="settings-page">
+      <div className="settings-page-head">
+        <h3>Saved memory</h3>
+        <p>Review what the assistant currently uses from each memory layer.</p>
+      </div>
+      <div className="memory-layer-grid settings-memory-grid">
+        <MemoryLayerPanel
+          description="Current task facts, project decisions, and active work context."
+          filePath={lab.filePaths.working}
+          notes={lab.workingMemory}
+          title="Working memory"
+        />
+        <MemoryLayerPanel
+          description="Stable user preferences, reusable facts, and global knowledge."
+          filePath={lab.filePaths.longTerm}
+          notes={lab.longTermMemory}
+          title="Long-term memory"
+        />
+      </div>
+    </section>
+  );
+}
+
+function MetricsSettingsPage({
+  totals,
+}: {
+  totals: MemoryMetricTotals;
+}) {
+  const rows: Array<{ label: string; value: string }> = [
+    { label: "Turns", value: totals.turns.toLocaleString("en-US") },
+    { label: "Request tokens", value: formatTokens(totals.requestTokens) },
+    { label: "Context tokens", value: formatTokens(totals.contextTokens) },
+    { label: "Response tokens", value: formatTokens(totals.responseTokens) },
+    { label: "Total tokens", value: formatTokens(totals.totalTokens) },
+    { label: "Elapsed time", value: `${totals.elapsedMs.toLocaleString("en-US")} ms` },
+    {
+      label: "Provider cost",
+      value: totals.hasProviderCost ? formatCost(totals.providerCost) : "n/a",
+    },
+  ];
+
+  return (
+    <section className="settings-page">
+      <div className="settings-page-head">
+        <h3>Metrics</h3>
+        <p>Global totals for this memory store, including deleted dialogs.</p>
+      </div>
+      <div className="metrics-total-grid">
+        {rows.map((row) => (
+          <article className="metric-total-card" key={row.label}>
+            <span>{row.label}</span>
+            <strong>{row.value}</strong>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function RequestContextSettingsPage({
+  context,
+}: {
+  context: RequestContextDebug | null;
+}) {
+  if (!context) {
+    return (
+      <section className="settings-page">
+        <div className="settings-page-head">
+          <h3>Request context</h3>
+          <p>Send a message to inspect the exact context payload assembled for the model.</p>
+        </div>
+        <div className="empty">No request context has been captured yet.</div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="settings-page request-context-page">
+      <div className="settings-page-head">
+        <h3>Request context</h3>
+        <p>
+          Payload/context sent to the LLM. Captured at{" "}
+          {new Date(context.createdAt).toLocaleString("en-US")}.
+        </p>
+      </div>
+      <RequestContextBlock
+        title="Active profile"
+        value={[
+          `Name: ${context.profile.name}`,
+          `Role/context: ${context.profile.roleContext || "- empty"}`,
+          `Style: ${context.profile.style || "- empty"}`,
+          `Format: ${context.profile.format || "- empty"}`,
+          `Constraints: ${context.profile.constraints || "- empty"}`,
+        ].join("\n")}
+      />
+      <RequestContextBlock
+        title="Selected branch summary"
+        value={[
+          `Branch: ${context.selectedBranchTitle}`,
+          context.selectedBranchSummary || "- empty",
+        ].join("\n")}
+      />
+      <RequestContextBlock
+        title="Recent selected-branch messages"
+        value={formatDebugMessages(context.recentMessages)}
+      />
+      <RequestContextBlock
+        title="Working memory"
+        value={formatDebugNotes(context.workingMemory)}
+      />
+      <RequestContextBlock
+        title="Long-term memory"
+        value={formatDebugNotes(context.longTermMemory)}
+      />
+      <RequestContextBlock
+        title="Full assembled messages"
+        value={formatDebugMessages(context.assembledMessages)}
+      />
+    </section>
+  );
+}
+
+function RequestContextBlock({
+  title,
+  value,
+}: {
+  title: string;
+  value: string;
+}) {
+  return (
+    <article className="request-context-block">
+      <h4>{title}</h4>
+      <pre>{value || "- empty"}</pre>
+    </article>
+  );
+}
+
+function formatDebugMessages(messages: ChatMessage[]) {
+  if (!messages.length) {
+    return "- empty";
+  }
+
+  return messages
+    .map((message, index) => `${index + 1}. ${message.role}\n${message.content}`)
+    .join("\n\n");
+}
+
+function formatDebugNotes(notes: MemoryLayerNote[]) {
+  if (!notes.length) {
+    return "- empty";
+  }
+
+  return notes.map((note) => `- ${note.text}`).join("\n");
 }
 
 function MemoryLayersView({
@@ -1683,7 +2335,16 @@ function MemoryLayersView({
   onRename,
   onSelect,
   onSend,
-  onFileSettingsSubmit,
+  onMemoryFolderMove,
+  onProfileApplySuggestion,
+  onProfileApplySuggestions,
+  onProfileCreate,
+  onProfileDelete,
+  onProfileDismissSuggestion,
+  onProfileDismissSuggestions,
+  onProfileRename,
+  onProfileSelect,
+  onProfileUpdate,
   prompt,
   setPrompt,
 }: {
@@ -1698,15 +2359,29 @@ function MemoryLayersView({
   onRename: (dialog: MemoryDialog) => void;
   onSelect: (dialogId: string) => void;
   onSend: (event: FormEvent<HTMLFormElement>) => void;
-  onFileSettingsSubmit: (settings: Partial<MemoryFileSettings>) => void;
+  onMemoryFolderMove: (memoryFolder: string) => void;
+  onProfileApplySuggestion: (profileUpdateId: string) => void;
+  onProfileApplySuggestions: (profileId: string) => void;
+  onProfileCreate: (name: string) => void;
+  onProfileDelete: (profileId: string) => void;
+  onProfileDismissSuggestion: (profileUpdateId: string) => void;
+  onProfileDismissSuggestions: (profileId: string) => void;
+  onProfileRename: (profileId: string, name: string) => void;
+  onProfileSelect: (profileId: string) => void;
+  onProfileUpdate: (profile: Partial<UserProfile> & { id: string }) => void;
   prompt: string;
   setPrompt: (value: string) => void;
 }) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const rows = activeDialog?.metrics ?? [];
   const lastMetricRow = rows[rows.length - 1];
   const activeBranch = activeDialog?.branches.find(
     (branch) => branch.id === activeDialog.activeBranchId,
   );
+  const activeBranchSummary =
+    activeBranch?.profileSummaries?.[lab.activeProfileId] ??
+    activeBranch?.summary ??
+    "";
   const modelOption = getModelOption(model);
   const contextLimit = modelOption?.contextWindowTokens ?? 128000;
   const usedContextTokens =
@@ -1716,19 +2391,23 @@ function MemoryLayersView({
     100,
     Math.round((usedContextTokens / contextLimit) * 1000) / 10,
   );
-  const shortTermNotes =
-    activeDialog?.messages
-      .filter((message) => message.role !== "system")
-      .slice(-8)
-      .map((message, index) => ({
-        id: `short-${index}`,
-        text: `${message.role}: ${message.content}`,
-        source: "automatic recent dialog window",
-        createdAt: "",
-      })) ?? [];
-
   return (
     <section className="token-lab memory-lab">
+      <div className="assistant-toolbar">
+        <div>
+          <p className="eyebrow">Unified assistant</p>
+          <h2>Personalized memory assistant</h2>
+        </div>
+        <button
+          aria-label="Open assistant settings"
+          className="icon-button"
+          onClick={() => setSettingsOpen(true)}
+          title="Settings"
+          type="button"
+        >
+          ⚙
+        </button>
+      </div>
       <div className="dialog-tabs" aria-label="Memory layer dialogs">
         {lab.dialogs.map((dialog) => (
           <div
@@ -1782,19 +2461,12 @@ function MemoryLayersView({
         <div className="empty">Create a dialog to start using memory layers.</div>
       ) : (
         <>
-          <MemoryFileSettingsForm
-            filePaths={lab.filePaths}
-            initialSettings={lab.fileSettings}
-            key={`${lab.fileSettings.memoryFolder}-${lab.fileSettings.shortTermFileName}-${lab.fileSettings.workingMemoryFileName}-${lab.fileSettings.longTermMemoryFileName}`}
-            loading={loading}
-            onSubmit={onFileSettingsSubmit}
-          />
           <ConversationHistory messages={activeDialog.messages} />
           <div className="branch-summary">
             <span>Active topic: {activeBranch?.title ?? "Main topic"}</span>
             <span>
-              {activeBranch?.summary
-                ? `Summary: ${activeBranch.summary}`
+              {activeBranchSummary
+                ? `Summary: ${activeBranchSummary}`
                 : "Summary: empty"}
             </span>
           </div>
@@ -1838,27 +2510,6 @@ function MemoryLayersView({
             </div>
           </form>
 
-          <div className="memory-layer-grid">
-            <MemoryLayerPanel
-              description="Current dialog window, selected automatically."
-              filePath={lab.filePaths.shortTerm}
-              notes={shortTermNotes}
-              title="Short-term memory"
-            />
-            <MemoryLayerPanel
-              description="Current task facts, project decisions, and active work context."
-              filePath={lab.filePaths.working}
-              notes={lab.workingMemory}
-              title="Working memory"
-            />
-            <MemoryLayerPanel
-              description="Stable user preferences, reusable facts, and global knowledge."
-              filePath={lab.filePaths.longTerm}
-              notes={lab.longTermMemory}
-              title="Long-term memory"
-            />
-          </div>
-
           <details open className="metrics-details">
             <summary>Memory routing trace</summary>
             {events.length === 0 ? (
@@ -1877,16 +2528,24 @@ function MemoryLayersView({
               </ol>
             )}
           </details>
-
-          <div className="metrics-summary">
-            <strong>Metrics</strong>
-            <span>{activeDialog.compactMetricsSummary}</span>
-          </div>
-          <div className="storage-summary">
-            File-backed document store: short-term dialog history is JSON;
-            working and long-term memory are editable Markdown files.
-          </div>
         </>
+      )}
+      {settingsOpen && (
+        <AssistantSettingsModal
+          lab={lab}
+          loading={loading}
+          onClose={() => setSettingsOpen(false)}
+          onMemoryFolderMove={onMemoryFolderMove}
+          onProfileApplySuggestion={onProfileApplySuggestion}
+          onProfileApplySuggestions={onProfileApplySuggestions}
+          onProfileCreate={onProfileCreate}
+          onProfileDelete={onProfileDelete}
+          onProfileDismissSuggestion={onProfileDismissSuggestion}
+          onProfileDismissSuggestions={onProfileDismissSuggestions}
+          onProfileRename={onProfileRename}
+          onProfileSelect={onProfileSelect}
+          onProfileUpdate={onProfileUpdate}
+        />
       )}
     </section>
   );

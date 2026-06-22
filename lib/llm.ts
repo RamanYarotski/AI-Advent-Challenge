@@ -1,6 +1,7 @@
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
+  profileId?: string;
 };
 
 type CallLlmInput = {
@@ -67,6 +68,11 @@ export async function callLlm(input: CallLlmInput): Promise<LlmResult> {
   }
 
   const startedAt = performance.now();
+  const messages = input.messages.map(({ role, content }) => ({
+    role,
+    content,
+  }));
+
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
@@ -77,7 +83,7 @@ export async function callLlm(input: CallLlmInput): Promise<LlmResult> {
     },
     body: JSON.stringify({
       model,
-      messages: input.messages,
+      messages,
       temperature: input.temperature,
       max_tokens: input.maxTokens,
       stop: input.stop,

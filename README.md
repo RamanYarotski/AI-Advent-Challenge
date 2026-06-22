@@ -2,11 +2,11 @@
 
 A Next.js + TypeScript playground for building an AI assistant step by step through the AI Advent Challenge.
 
-The project started as small isolated LLM experiments and is now evolving into one practical assistant. Each day adds a visible feature and a small piece of agent architecture: API access, output control, reasoning, model evaluation, memory, token tracking, compression, branching, and file-backed long-term context.
+The project started as small isolated LLM experiments and is now evolving into one practical assistant. Each day adds a visible feature and a small piece of agent architecture: API access, output control, reasoning, model evaluation, memory, token tracking, compression, branching, file-backed long-term context, and personalization.
 
 ## Current Stage
 
-The current build is a unified assistant with automatic topic branches, context compression, compact metrics, and file-backed memory. The main prompt is assembled from the relevant branch summary, recent messages, working memory, and long-term memory.
+The current build is a unified assistant with automatic topic branches, context compression, global metrics, file-backed memory, manageable user profiles, and language-agnostic profile-learning suggestions. The main prompt is assembled from the active profile, profile-scoped branch summary, profile-scoped recent messages, working memory, and long-term memory; explicit profile preferences stay in confirmed profile suggestions instead of being silently duplicated into long-term memory.
 
 ## Progress
 
@@ -21,6 +21,7 @@ The current build is a unified assistant with automatic topic branches, context 
 - Day 9: added context compression, where older messages are summarized and recent messages stay live in the prompt.
 - Day 10: explored context strategies under the hood, including sliding windows, sticky facts, and branch-based topic separation.
 - Day 11: merged compression, branching, and memory layers into the main assistant with editable JSON/Markdown-backed memory files.
+- Day 12: added full user profile management, language-agnostic confirmed profile update suggestions, profile-scoped prompt context, memory folder moves, global metrics, and request-context inspection so personalization and memory injection are visible and testable.
 
 ## Run Locally
 

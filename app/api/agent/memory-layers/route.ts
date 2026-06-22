@@ -1,19 +1,35 @@
 import { NextResponse } from "next/server";
 import {
+  addGlobalMetricRow,
+  addPendingProfileUpdates,
   appendMemoryNote,
+  applyAllPendingProfileUpdates,
+  applyPendingProfileUpdate,
   createMemoryDialog,
+  createUserProfile,
   deleteMemoryDialog,
+  deleteUserProfile,
+  dismissAllPendingProfileUpdates,
+  dismissPendingProfileUpdate,
   getActiveMemoryBranch,
   getActiveMemoryDialog,
+  getActiveUserProfile,
   makeMemoryLayerId,
+  moveMemoryFolder,
   type MemoryBranch,
   type MemoryDialog,
   type MemoryFileSettings,
   type MemoryLayerEvent,
   type MemoryLayerKey,
   type MemoryLayerNote,
+  type RequestContextDebug,
+  type UserProfile,
+  type UserProfileField,
   readMemoryLayersState,
+  renameUserProfile,
+  setActiveUserProfile,
   updateMemoryFileSettings,
+  updateUserProfile,
   withUpdatedActiveMemoryDialog,
   writeMemoryLayersState,
 } from "@/lib/agent/memory-layers-store";
@@ -34,7 +50,17 @@ type MemoryLayerAction =
   | "send_message"
   | "set_active_dialog"
   | "rename_dialog"
-  | "set_file_settings";
+  | "set_file_settings"
+  | "move_memory_folder"
+  | "create_profile"
+  | "rename_profile"
+  | "delete_profile"
+  | "set_active_profile"
+  | "update_profile"
+  | "apply_profile_update"
+  | "dismiss_profile_update"
+  | "apply_all_profile_updates"
+  | "dismiss_all_profile_updates";
 
 type MemoryLayersRequestBody = {
   action?: MemoryLayerAction;
@@ -42,7 +68,11 @@ type MemoryLayersRequestBody = {
   title?: string;
   prompt?: string;
   model?: string;
+  memoryFolder?: string;
   fileSettings?: Partial<MemoryFileSettings>;
+  profileId?: string;
+  profileUpdateId?: string;
+  profile?: Partial<UserProfile>;
 };
 
 type AssistantMemoryUpdate = {
@@ -50,6 +80,14 @@ type AssistantMemoryUpdate = {
   text: string;
   confidence: number;
   reason: string;
+};
+
+type AssistantProfileUpdate = {
+  field: UserProfileField;
+  value: string;
+  reason: string;
+  sourceText: string;
+  confidence: number;
 };
 
 type AssistantStructuredResult = {
@@ -68,6 +106,7 @@ const MAX_RECENT_BRANCH_MESSAGES = 8;
 const SUMMARY_TRIGGER_MESSAGES = 12;
 const AUTO_SAVE_CONFIDENCE = 0.72;
 const CONFIRMATION_CONFIDENCE = 0.45;
+const PROFILE_SUGGESTION_CONFIDENCE = 0.55;
 
 function layerLabel(layer: MemoryLayerKey) {
   if (layer === "shortTerm") {
@@ -81,6 +120,12 @@ function layerLabel(layer: MemoryLayerKey) {
 
 function visibleMessages(messages: ChatMessage[]) {
   return messages.filter((message) => message.role !== "system");
+}
+
+function profileScopedMessages(messages: ChatMessage[], profileId: string) {
+  return visibleMessages(messages).filter(
+    (message) => message.profileId === profileId,
+  );
 }
 
 function formatNotes(title: string, notes: MemoryLayerNote[]) {
@@ -107,30 +152,34 @@ function normalizeWords(text: string) {
   );
 }
 
-function branchSearchText(branch: MemoryBranch) {
+function branchSummaryForProfile(branch: MemoryBranch, profileId: string) {
+  return branch.profileSummaries?.[profileId] ?? "";
+}
+
+function branchSearchText(branch: MemoryBranch, profileId: string) {
   return [
     branch.title,
-    branch.summary,
-    ...visibleMessages(branch.messages)
+    branchSummaryForProfile(branch, profileId),
+    ...profileScopedMessages(branch.messages, profileId)
       .slice(-4)
       .map((message) => message.content),
   ].join(" ");
 }
 
-function scoreBranch(prompt: string, branch: MemoryBranch) {
+function scoreBranch(prompt: string, branch: MemoryBranch, profileId: string) {
   const promptWords = normalizeWords(prompt);
   if (!promptWords.length) {
     return 0;
   }
 
-  const branchWords = new Set(normalizeWords(branchSearchText(branch)));
+  const branchWords = new Set(normalizeWords(branchSearchText(branch, profileId)));
   return promptWords.filter((word) => branchWords.has(word)).length;
 }
 
-function selectRelevantBranch(dialog: MemoryDialog, prompt: string) {
+function selectRelevantBranch(dialog: MemoryDialog, prompt: string, profileId: string) {
   const active = getActiveMemoryBranch(dialog);
   const scored = dialog.branches
-    .map((branch) => ({ branch, score: scoreBranch(prompt, branch) }))
+    .map((branch) => ({ branch, score: scoreBranch(prompt, branch, profileId) }))
     .sort((left, right) => right.score - left.score);
   const best = scored[0];
 
@@ -170,10 +219,61 @@ function extractJsonObject(text: string) {
   return candidate.slice(start, end + 1);
 }
 
+function extractJsonValue(text: string) {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced?.[1] ?? trimmed;
+  const objectStart = candidate.indexOf("{");
+  const arrayStart = candidate.indexOf("[");
+  const starts = [objectStart, arrayStart].filter((index) => index >= 0);
+  const start = starts.length ? Math.min(...starts) : -1;
+
+  if (start === -1) {
+    return "{}";
+  }
+
+  const opener = candidate[start];
+  const closer = opener === "{" ? "}" : "]";
+  const end = candidate.lastIndexOf(closer);
+
+  if (end === -1 || end <= start) {
+    return "{}";
+  }
+
+  return candidate.slice(start, end + 1);
+}
+
 function normalizeConfidence(value: unknown) {
   return typeof value === "number" && Number.isFinite(value)
     ? Math.max(0, Math.min(1, value))
     : 0;
+}
+
+function normalizeProfileField(value: unknown): UserProfileField | null {
+  if (value === "role" || value === "context" || value === "role_context") {
+    return "roleContext";
+  }
+  return value === "roleContext" ||
+    value === "style" ||
+    value === "format" ||
+    value === "constraints"
+    ? value
+    : null;
+}
+
+function isProfileLikeMemoryText(text: string) {
+  return /\b(prefer|prefers|preference|style|format|tone|verbosity|communication|answer|answers|bullet|bullets|list|lists|concise|detailed|positive|avoid|forbidden|disliked|do not|don't|plain language|step-by-step)\b/i.test(
+    text,
+  );
+}
+
+function filterProfileLikeMemoryNotes(notes: MemoryLayerNote[]) {
+  const filtered = notes.filter((note) => !isProfileLikeMemoryText(note.text));
+
+  return {
+    notes: filtered,
+    removedCount: notes.length - filtered.length,
+  };
 }
 
 function normalizeStructuredResult(value: unknown, fallbackAnswer: string): AssistantStructuredResult {
@@ -228,7 +328,6 @@ function normalizeStructuredResult(value: unknown, fallbackAnswer: string): Assi
             update !== null && update.text.length > 0,
         )
     : [];
-
   return {
     answer:
       typeof candidate.answer === "string" && candidate.answer.trim()
@@ -266,6 +365,152 @@ function parseAssistantResult(answer: string) {
   }
 }
 
+function normalizeProfileUpdates(value: unknown): AssistantProfileUpdate[] {
+  const candidate = value as { profileUpdates?: unknown };
+  const updates = Array.isArray(value)
+    ? value
+    : Array.isArray(candidate?.profileUpdates)
+      ? candidate.profileUpdates
+      : [];
+
+  return updates.length > 0
+    ? updates
+        .map((item) => {
+          const update = item as Partial<AssistantProfileUpdate>;
+          const field = normalizeProfileField(update.field);
+          if (!field) {
+            return null;
+          }
+          return {
+            field,
+            value: typeof update.value === "string" ? update.value.trim() : "",
+            reason: typeof update.reason === "string" ? update.reason.trim() : "",
+            sourceText:
+              typeof update.sourceText === "string"
+                ? update.sourceText.trim()
+                : "",
+            confidence: normalizeConfidence(update.confidence),
+          };
+        })
+        .filter(
+          (update): update is AssistantProfileUpdate =>
+            update !== null &&
+            update.value.length > 0 &&
+            update.confidence >= PROFILE_SUGGESTION_CONFIDENCE,
+        )
+    : [];
+}
+
+function parseProfileExtractorResult(answer: string) {
+  try {
+    return normalizeProfileUpdates(JSON.parse(extractJsonValue(answer)));
+  } catch {
+    return [];
+  }
+}
+
+function buildProfileExtractorMessages(input: {
+  prompt: string;
+  activeProfile: UserProfile;
+}) {
+  return [
+    {
+      role: "system" as const,
+      content: [
+        "You are a language-agnostic profile preference extractor.",
+        "Detect explicit user preferences in any language.",
+        "Return only valid JSON. Do not wrap JSON in markdown.",
+        "Return canonical English profile values.",
+        "Keep sourceText exactly as written by the user.",
+        "Do not infer preferences from vague behavior, assistant messages, prior messages, or guesses.",
+        "Only use the current user message as evidence.",
+        "If there are no explicit profile preferences, return an empty profileUpdates array.",
+        "If a message explicitly states how the assistant should communicate or what tools/approaches to use or avoid, return a suggestion even when the message is not in English.",
+        "",
+        "Allowed fields:",
+        "- roleContext: explicit user role, background, work context, or durable personal context.",
+        "- style: preferred tone, verbosity, communication style, or answer personality.",
+        "- format: preferred response structure, bullets, tables, code-first, step-by-step, etc.",
+        "- constraints: explicit do/don't rules, disliked tools, forbidden approaches, durable limits.",
+        "",
+        "Examples:",
+        'User: "предпочитаю лаконичный стиль общения и ответы списками"',
+        '{"profileUpdates":[{"field":"style","value":"Concise communication style","reason":"The user explicitly prefers concise communication.","sourceText":"предпочитаю лаконичный стиль общения и ответы списками","confidence":0.92},{"field":"format","value":"Answer with bullet points","reason":"The user explicitly prefers answers as lists.","sourceText":"предпочитаю лаконичный стиль общения и ответы списками","confidence":0.92}]}',
+        'User: "я против использования RXJava"',
+        '{"profileUpdates":[{"field":"constraints","value":"Avoid using or recommending RXJava","reason":"The user explicitly rejects RXJava.","sourceText":"я против использования RXJava","confidence":0.94}]}',
+        "",
+        "JSON schema:",
+        '{"profileUpdates":[{"field":"roleContext|style|format|constraints","value":"canonical English preference","reason":"short English reason","sourceText":"exact user text","confidence":0.0}]}',
+      ].join("\n"),
+    },
+    {
+      role: "system" as const,
+      content: [
+        "Active profile:",
+        `Name: ${input.activeProfile.name}`,
+        `Role/context: ${input.activeProfile.roleContext || "- empty"}`,
+        `Style: ${input.activeProfile.style || "- empty"}`,
+        `Format: ${input.activeProfile.format || "- empty"}`,
+        `Constraints: ${input.activeProfile.constraints || "- empty"}`,
+      ].join("\n"),
+    },
+    {
+      role: "user" as const,
+      content: input.prompt,
+    },
+  ];
+}
+
+async function extractProfileUpdates(input: {
+  prompt: string;
+  activeProfile: UserProfile;
+  model?: string;
+}) {
+  const result = await callLlm({
+    messages: buildProfileExtractorMessages({
+      prompt: input.prompt,
+      activeProfile: input.activeProfile,
+    }),
+    model: input.model,
+    temperature: 0,
+  });
+
+  return parseProfileExtractorResult(result.answer);
+}
+
+function filterProfilePreferenceMemoryUpdates(
+  updates: AssistantMemoryUpdate[],
+  suggestions: Array<{ field: UserProfileField; value: string; reason: string }>,
+) {
+  if (!suggestions.length) {
+    return {
+      keptUpdates: updates,
+      suppressedCount: 0,
+    };
+  }
+
+  const suggestionWords = new Set(
+    normalizeWords(
+      suggestions
+        .map((suggestion) =>
+          [suggestion.field, suggestion.value, suggestion.reason].join(" "),
+        )
+        .join(" "),
+    ),
+  );
+  const keptUpdates = updates.filter((update) => {
+    const updateWords = normalizeWords(`${update.text} ${update.reason}`);
+    const sharedWords = updateWords.filter((word) => suggestionWords.has(word));
+
+    return sharedWords.length < 2;
+  });
+
+  return {
+    keptUpdates,
+    suppressedCount: updates.length - keptUpdates.length,
+  };
+}
+
 function noteExists(notes: MemoryLayerNote[], text: string) {
   return notes.some(
     (note) => note.text.trim().toLowerCase() === text.trim().toLowerCase(),
@@ -286,6 +531,7 @@ function makeBranch(title: string, userMessage: ChatMessage, assistantMessage: C
     id: makeMemoryLayerId("memory-branch"),
     title,
     summary: "",
+    profileSummaries: {},
     messages: [userMessage, assistantMessage],
     updatedAt: new Date().toISOString(),
   };
@@ -294,11 +540,14 @@ function makeBranch(title: string, userMessage: ChatMessage, assistantMessage: C
 function buildMessages(input: {
   prompt: string;
   selectedBranch: MemoryBranch;
+  selectedBranchSummary: string;
   recentMessages: ChatMessage[];
   workingMemory: MemoryLayerNote[];
   longTermMemory: MemoryLayerNote[];
+  activeProfile: UserProfile;
   filePathsText: string;
   needsSummary: boolean;
+  currentProfileSuggestionCount: number;
 }) {
   return [
     {
@@ -315,7 +564,14 @@ function buildMessages(input: {
         "",
         "Memory rules:",
         "- working: current task, active project decisions, temporary constraints, open implementation goals.",
-        "- longTerm: stable user preferences, reusable profile facts, durable global rules.",
+        "- longTerm: reusable facts and durable global rules that are not profile preferences.",
+        "- active user profile: personalization preferences that should influence every answer without changing the assistant role.",
+        "- Do not save explicit user preferences about role/context, style, answer format, or constraints to memoryUpdates. A separate profile extractor handles those as confirmed profile suggestions.",
+        "- If the user asks what style, format, constraints, role, or profile preferences are active, answer only from the Active user profile block. If that field is empty, say no preference is set for the current profile.",
+        "- Do not infer the current profile's preferences from recent messages, working memory, or long-term memory. Those sources can contain another profile's history.",
+        input.currentProfileSuggestionCount > 0
+          ? `- The current user message already produced ${input.currentProfileSuggestionCount} pending profile suggestion(s). Do not duplicate those unconfirmed preferences in working or long-term memory.`
+          : "- If the current message contains only profile preferences, return an empty memoryUpdates array.",
         "- Ordinary questions and transient chat should not be added to memoryUpdates.",
         "- Use confidence >= 0.72 for clear automatic writes.",
         "- Use confidence 0.45-0.71 only when a confirmation question is necessary.",
@@ -331,8 +587,16 @@ function buildMessages(input: {
       role: "system" as const,
       content: [
         input.filePathsText,
+        [
+          "Active user profile:",
+          `Name: ${input.activeProfile.name}`,
+          `Role/context: ${input.activeProfile.roleContext || "- empty"}`,
+          `Style: ${input.activeProfile.style || "- empty"}`,
+          `Format: ${input.activeProfile.format || "- empty"}`,
+          `Constraints: ${input.activeProfile.constraints || "- empty"}`,
+        ].join("\n"),
         `Selected branch: ${input.selectedBranch.title}`,
-        `Selected branch summary:\n${input.selectedBranch.summary || "- empty"}`,
+        `Selected branch summary:\n${input.selectedBranchSummary || "- empty"}`,
         formatNotes("Working memory", input.workingMemory),
         formatNotes("Long-term memory", input.longTermMemory),
       ].join("\n\n"),
@@ -343,6 +607,27 @@ function buildMessages(input: {
       content: input.prompt,
     },
   ];
+}
+
+function buildRequestContextDebug(input: {
+  activeProfile: UserProfile;
+  selectedBranch: MemoryBranch;
+  selectedBranchSummary: string;
+  recentMessages: ChatMessage[];
+  workingMemory: MemoryLayerNote[];
+  longTermMemory: MemoryLayerNote[];
+  assembledMessages: ChatMessage[];
+}): RequestContextDebug {
+  return {
+    createdAt: new Date().toISOString(),
+    profile: input.activeProfile,
+    selectedBranchTitle: input.selectedBranch.title,
+    selectedBranchSummary: input.selectedBranchSummary,
+    recentMessages: input.recentMessages,
+    workingMemory: input.workingMemory,
+    longTermMemory: input.longTermMemory,
+    assembledMessages: input.assembledMessages,
+  };
 }
 
 function summarizeMetrics(rows: TokenMetricRow[]) {
@@ -446,7 +731,7 @@ function applyMemoryUpdates(input: {
     events.push({
       layer: "longTerm",
       action: "skipped",
-      detail: "No clear stable preference or reusable fact was saved automatically.",
+      detail: "No clear reusable fact or durable global rule was saved automatically.",
       filePath: input.longTermFilePath,
     });
   }
@@ -468,6 +753,7 @@ function updateBranch(input: {
   userMessage: ChatMessage;
   assistantMessage: ChatMessage;
   needsSummary: boolean;
+  activeProfileId: string;
 }) {
   const now = new Date().toISOString();
   let activeBranchId = input.selectedBranch.id;
@@ -476,7 +762,16 @@ function updateBranch(input: {
 
   if (input.structured.branch.action === "create") {
     const title = input.structured.branch.title || "New topic";
-    const branch = makeBranch(title, input.userMessage, input.assistantMessage);
+    const summary = input.structured.branch.summary ?? "";
+    const branch = {
+      ...makeBranch(title, input.userMessage, input.assistantMessage),
+      summary,
+      profileSummaries: summary
+        ? {
+            [input.activeProfileId]: summary,
+          }
+        : {},
+    };
     activeBranchId = branch.id;
     branches = [...branches, branch];
     events.push({
@@ -496,14 +791,12 @@ function updateBranch(input: {
         input.userMessage,
         input.assistantMessage,
       ];
+      const profileSummaries = branch.profileSummaries ?? {};
+      const currentProfileSummary =
+        profileSummaries[input.activeProfileId] ?? "";
       const summary =
         input.structured.branch.summary ??
-        branch.summary;
-      const shouldPrune =
-        input.needsSummary &&
-        summary.trim().length > 0 &&
-        nextMessages.length > MAX_RECENT_BRANCH_MESSAGES;
-
+        currentProfileSummary;
       if (input.structured.branch.action === "rename" && input.structured.branch.title) {
         events.push({
           layer: "shortTerm",
@@ -513,7 +806,7 @@ function updateBranch(input: {
         });
       }
 
-      if (summary !== branch.summary) {
+      if (summary !== currentProfileSummary) {
         events.push({
           layer: "shortTerm",
           action: "updated_summary",
@@ -529,9 +822,13 @@ function updateBranch(input: {
             ? input.structured.branch.title
             : branch.title,
         summary,
-        messages: shouldPrune
-          ? nextMessages.slice(-MAX_RECENT_BRANCH_MESSAGES)
-          : nextMessages,
+        profileSummaries: summary
+          ? {
+              ...profileSummaries,
+              [input.activeProfileId]: summary,
+            }
+          : profileSummaries,
+        messages: nextMessages,
         updatedAt: now,
       };
     });
@@ -632,16 +929,150 @@ export async function POST(request: Request) {
       return NextResponse.json(nextState);
     }
 
+    if (action === "move_memory_folder") {
+      if (!body.memoryFolder?.trim()) {
+        return NextResponse.json(
+          { error: "memoryFolder is required." },
+          { status: 400 },
+        );
+      }
+      const nextState = await moveMemoryFolder(state, body.memoryFolder);
+      await writeMemoryLayersState(nextState);
+      return NextResponse.json(nextState);
+    }
+
+    if (action === "create_profile") {
+      if (!body.title?.trim()) {
+        return NextResponse.json(
+          { error: "Profile name is required." },
+          { status: 400 },
+        );
+      }
+      const nextState = createUserProfile(state, body.title);
+      await writeMemoryLayersState(nextState);
+      return NextResponse.json(nextState);
+    }
+
+    if (action === "rename_profile") {
+      if (!body.profileId || !body.title?.trim()) {
+        return NextResponse.json(
+          { error: "profileId and title are required." },
+          { status: 400 },
+        );
+      }
+      const nextState = renameUserProfile(state, body.profileId, body.title);
+      await writeMemoryLayersState(nextState);
+      return NextResponse.json(nextState);
+    }
+
+    if (action === "delete_profile") {
+      if (!body.profileId) {
+        return NextResponse.json({ error: "profileId is required." }, { status: 400 });
+      }
+      const nextState = deleteUserProfile(state, body.profileId);
+      await writeMemoryLayersState(nextState);
+      return NextResponse.json(nextState);
+    }
+
+    if (action === "set_active_profile") {
+      if (!body.profileId) {
+        return NextResponse.json({ error: "profileId is required." }, { status: 400 });
+      }
+      const nextState = setActiveUserProfile(state, body.profileId);
+      await writeMemoryLayersState(nextState);
+      return NextResponse.json(nextState);
+    }
+
+    if (action === "update_profile") {
+      if (!body.profile?.id) {
+        return NextResponse.json({ error: "profile is required." }, { status: 400 });
+      }
+      const nextState = updateUserProfile(
+        state,
+        body.profile as Partial<UserProfile> & { id: string },
+      );
+      await writeMemoryLayersState(nextState);
+      return NextResponse.json(nextState);
+    }
+
+    if (action === "apply_profile_update") {
+      if (!body.profileUpdateId) {
+        return NextResponse.json(
+          { error: "profileUpdateId is required." },
+          { status: 400 },
+        );
+      }
+      const nextState = applyPendingProfileUpdate(state, body.profileUpdateId);
+      await writeMemoryLayersState(nextState);
+      return NextResponse.json(nextState);
+    }
+
+    if (action === "dismiss_profile_update") {
+      if (!body.profileUpdateId) {
+        return NextResponse.json(
+          { error: "profileUpdateId is required." },
+          { status: 400 },
+        );
+      }
+      const nextState = dismissPendingProfileUpdate(state, body.profileUpdateId);
+      await writeMemoryLayersState(nextState);
+      return NextResponse.json(nextState);
+    }
+
+    if (action === "apply_all_profile_updates") {
+      const nextState = applyAllPendingProfileUpdates(state, body.profileId);
+      await writeMemoryLayersState(nextState);
+      return NextResponse.json(nextState);
+    }
+
+    if (action === "dismiss_all_profile_updates") {
+      const nextState = dismissAllPendingProfileUpdates(state, body.profileId);
+      await writeMemoryLayersState(nextState);
+      return NextResponse.json(nextState);
+    }
+
     const prompt = body.prompt?.trim();
     if (!prompt) {
       return NextResponse.json({ error: "Prompt is required." }, { status: 400 });
     }
 
     const active = getActiveMemoryDialog(state);
-    const selected = selectRelevantBranch(active, prompt);
-    const selectedVisible = visibleMessages(selected.branch.messages);
+    const activeProfile = getActiveUserProfile(state);
+    const selected = selectRelevantBranch(active, prompt, activeProfile.id);
+    const selectedVisible = profileScopedMessages(
+      selected.branch.messages,
+      activeProfile.id,
+    );
+    const selectedBranchSummary = branchSummaryForProfile(
+      selected.branch,
+      activeProfile.id,
+    );
+    const promptWorkingMemory = filterProfileLikeMemoryNotes(state.workingMemory);
+    const promptLongTermMemory = filterProfileLikeMemoryNotes(state.longTermMemory);
     const needsSummary = selectedVisible.length >= SUMMARY_TRIGGER_MESSAGES;
     const recentMessages = selectedVisible.slice(-MAX_RECENT_BRANCH_MESSAGES);
+    let extractorError: string | null = null;
+    let extractedProfileUpdates: AssistantProfileUpdate[] = [];
+    try {
+      extractedProfileUpdates = await extractProfileUpdates({
+        prompt,
+        activeProfile,
+        model: body.model,
+      });
+    } catch (error) {
+      extractorError =
+        error instanceof Error
+          ? error.message
+          : "Profile extractor request failed.";
+    }
+    const pendingProfileUpdates = extractedProfileUpdates.map((update) => ({
+      profileId: activeProfile.id,
+      field: update.field,
+      value: update.value,
+      reason: update.reason,
+      sourceText: update.sourceText || prompt,
+      confidence: update.confidence,
+    }));
     const filePathsText = [
       "Memory files:",
       `- Short-term branch JSON: ${state.filePaths.shortTerm}`,
@@ -651,11 +1082,23 @@ export async function POST(request: Request) {
     const messagesForCall = buildMessages({
       prompt,
       selectedBranch: selected.branch,
+      selectedBranchSummary,
       recentMessages,
-      workingMemory: state.workingMemory,
-      longTermMemory: state.longTermMemory,
+      workingMemory: promptWorkingMemory.notes,
+      longTermMemory: promptLongTermMemory.notes,
+      activeProfile,
       filePathsText,
       needsSummary,
+      currentProfileSuggestionCount: pendingProfileUpdates.length,
+    });
+    const requestContext = buildRequestContextDebug({
+      activeProfile,
+      selectedBranch: selected.branch,
+      selectedBranchSummary,
+      recentMessages,
+      workingMemory: promptWorkingMemory.notes,
+      longTermMemory: promptLongTermMemory.notes,
+      assembledMessages: messagesForCall,
     });
     const result = await callLlm({
       messages: messagesForCall,
@@ -663,8 +1106,12 @@ export async function POST(request: Request) {
       temperature: 0.2,
     });
     const structured = parseAssistantResult(result.answer);
+    const filteredMemoryUpdates = filterProfilePreferenceMemoryUpdates(
+      structured.memoryUpdates,
+      pendingProfileUpdates,
+    );
     const memoryUpdate = applyMemoryUpdates({
-      updates: structured.memoryUpdates,
+      updates: filteredMemoryUpdates.keptUpdates,
       workingMemory: state.workingMemory,
       longTermMemory: state.longTermMemory,
       workingFilePath: state.filePaths.working,
@@ -684,10 +1131,15 @@ export async function POST(request: Request) {
       confirmationQuestion && !structured.answer.includes(confirmationQuestion)
         ? `${structured.answer}\n\n${confirmationQuestion}`
         : structured.answer;
-    const userMessage: ChatMessage = { role: "user", content: prompt };
+    const userMessage: ChatMessage = {
+      role: "user",
+      content: prompt,
+      profileId: activeProfile.id,
+    };
     const assistantMessage: ChatMessage = {
       role: "assistant",
       content: assistantAnswer,
+      profileId: activeProfile.id,
     };
     const branchUpdate = updateBranch({
       dialog: active,
@@ -696,6 +1148,7 @@ export async function POST(request: Request) {
       userMessage,
       assistantMessage,
       needsSummary,
+      activeProfileId: activeProfile.id,
     });
     const contextTokens = estimateMessageTokens(messagesForCall).estimatedTokens;
     const requestTokens = estimateTextTokens(prompt).estimatedTokens;
@@ -736,20 +1189,54 @@ export async function POST(request: Request) {
       {
         layer: "shortTerm",
         action: "prompt_context",
-        detail: `Prompt assembly used branch summary (${selected.branch.summary ? "present" : "empty"}), ${recentMessages.length} recent branch messages, working memory, and long-term memory.`,
+        detail: [
+          `Profile: ${activeProfile.name}`,
+          `Memory layers: selected branch summary (${selectedBranchSummary ? "present" : "empty"}), ${recentMessages.length} profile-scoped recent messages, ${promptWorkingMemory.notes.length} working memory items, ${promptLongTermMemory.notes.length} long-term memory items.`,
+          `Profile-like memory filtered from prompt: ${promptWorkingMemory.removedCount + promptLongTermMemory.removedCount}.`,
+          "Injected profile fields: role/context, style, format, constraints.",
+        ].join("\n"),
         filePath: state.filePaths.shortTerm,
       },
+      {
+        layer: "longTerm",
+        action: pendingProfileUpdates.length > 0 ? "needs_confirmation" : "skipped",
+        detail: extractorError
+          ? `Profile extractor failed: ${extractorError}`
+          : pendingProfileUpdates.length > 0
+            ? `${pendingProfileUpdates.length} language-agnostic profile suggestion${
+                pendingProfileUpdates.length === 1 ? "" : "s"
+              } captured for review in Settings > Profile. Values are canonical English; source text stays original.`
+            : "Profile extractor found no explicit profile preference in the current user message.",
+        filePath: state.filePaths.userProfiles,
+      },
+      ...(filteredMemoryUpdates.suppressedCount > 0
+        ? [
+            {
+              layer: "longTerm" as const,
+              action: "skipped" as const,
+              detail: `${filteredMemoryUpdates.suppressedCount} memory update${
+                filteredMemoryUpdates.suppressedCount === 1 ? "" : "s"
+              } suppressed because it duplicated pending profile suggestions.`,
+              filePath: state.filePaths.longTerm,
+            },
+          ]
+        : []),
       ...branchUpdate.events.map((event) => ({
         ...event,
         filePath: event.filePath || state.filePaths.shortTerm,
       })),
     ];
     const nextState = withUpdatedActiveMemoryDialog(
-      {
+      addGlobalMetricRow({
         ...state,
         workingMemory: memoryUpdate.workingMemory,
         longTermMemory: memoryUpdate.longTermMemory,
-      },
+        lastRequestContext: requestContext,
+        pendingProfileUpdates: addPendingProfileUpdates(
+          state,
+          pendingProfileUpdates,
+        ).pendingProfileUpdates,
+      }, metricRow),
       (dialog) => ({
         ...dialog,
         activeBranchId: branchUpdate.activeBranchId,
