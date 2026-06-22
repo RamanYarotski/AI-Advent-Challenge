@@ -2,11 +2,11 @@
 
 A Next.js + TypeScript playground for building an AI assistant step by step through the AI Advent Challenge.
 
-The project started as small isolated LLM experiments and is now evolving into one practical assistant. Each day adds a visible feature and a small piece of agent architecture: API access, output control, reasoning, model evaluation, memory, token tracking, compression, branching, file-backed long-term context, and personalization.
+The project started as small isolated LLM experiments and is now evolving into one practical assistant. Each day adds a visible feature and a small piece of agent architecture: API access, output control, reasoning, model evaluation, memory, token tracking, compression, branching, file-backed long-term context, personalization, and task orchestration.
 
 ## Current Stage
 
-The current build is a unified assistant with automatic topic branches, context compression, global metrics, file-backed memory, manageable user profiles, and language-agnostic profile-learning suggestions. The main prompt is assembled from the active profile, profile-scoped branch summary, profile-scoped recent messages, working memory, and long-term memory; explicit profile preferences stay in confirmed profile suggestions instead of being silently duplicated into long-term memory.
+The current build is a unified assistant with automatic topic branches, context compression, global metrics, file-backed memory, manageable user profiles, language-agnostic profile-learning suggestions, and lifecycle-only orchestration. Every user turn now runs through a persisted `Planning -> Execution -> Validation -> Done` state machine, with a planning swarm, a structured requirements contract, explicit plan approval before execution, stage-local agent contracts, scoped invariants, validation gates, transition logs, and request-context inspection.
 
 ## Progress
 
@@ -22,6 +22,11 @@ The current build is a unified assistant with automatic topic branches, context 
 - Day 10: explored context strategies under the hood, including sliding windows, sticky facts, and branch-based topic separation.
 - Day 11: merged compression, branching, and memory layers into the main assistant with editable JSON/Markdown-backed memory files.
 - Day 12: added full user profile management, language-agnostic confirmed profile update suggestions, profile-scoped prompt context, memory folder moves, global metrics, and request-context inspection so personalization and memory injection are visible and testable.
+- Day 13-15: combined the task-state, invariant, swarm, and transition-control assignments into one unified assistant upgrade: an internal lifecycle-only task orchestrator routes every user turn through stage-local agents, runs a planning swarm, injects active invariants, validates before completion, and stores task state in the file-backed memory model.
+
+## Architecture Notes
+
+- [Day 13-15 orchestrated task lifecycle](docs/day-13.md)
 
 ## Run Locally
 

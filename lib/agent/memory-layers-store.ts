@@ -15,6 +15,7 @@ export type MemoryFileSettings = {
   workingMemoryFileName: string;
   longTermMemoryFileName: string;
   userProfilesFileName: string;
+  invariantsFileName: string;
 };
 
 export type MemoryFilePaths = {
@@ -22,6 +23,7 @@ export type MemoryFilePaths = {
   working: string;
   longTerm: string;
   userProfiles: string;
+  invariants: string;
   index: string;
 };
 
@@ -41,9 +43,128 @@ export type MemoryLayerEvent = {
     | "selected_branch"
     | "created_branch"
     | "updated_summary"
-    | "prompt_context";
+    | "prompt_context"
+    | "task_state"
+    | "agent_run"
+    | "transition"
+    | "invariant_check";
   detail: string;
   filePath: string;
+};
+
+export type TaskState = "planning" | "execution" | "validation" | "done";
+
+export type TaskInvariantScope = "global" | "task" | "stage";
+
+export type TaskInvariantSeverity = "blocker" | "warning";
+
+export type TaskInvariant = {
+  id: string;
+  title: string;
+  description: string;
+  scope: TaskInvariantScope;
+  appliesTo: TaskState[];
+  severity: TaskInvariantSeverity;
+  enabled: boolean;
+  source: "built-in" | "user" | "task";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RequirementsContract = {
+  goal: string;
+  targetLocation: string | null;
+  requirements: string[];
+  constraints: string[];
+  assumptions: string[];
+  acceptanceCriteria: string[];
+  openQuestions: string[];
+  readyForApproval: boolean;
+  updatedAt: string;
+};
+
+export type TaskContext = {
+  id: string;
+  task: string;
+  state: TaskState;
+  step: number;
+  total: number;
+  plan: string[];
+  done: string[];
+  current: string;
+  pausedReason: string | null;
+  awaitingPlanApproval: boolean;
+  requirementsContract: RequirementsContract;
+  startedAt: string;
+  updatedAt: string;
+};
+
+export type StageArtifact = {
+  id: string;
+  stage: TaskState;
+  title: string;
+  content: string;
+  summary: string;
+  createdAt: string;
+};
+
+export type AgentRun = {
+  id: string;
+  agentId: string;
+  stage: TaskState;
+  role: string;
+  inputSummary: string;
+  output: string;
+  findings: string[];
+  confidence: number;
+  createdAt: string;
+};
+
+export type SwarmRun = {
+  id: string;
+  stage: TaskState;
+  agentIds: string[];
+  outputs: AgentRun[];
+  aggregatedDecision: string;
+  createdAt: string;
+};
+
+export type StagePayload = {
+  id: string;
+  stage: TaskState;
+  agentId: string;
+  role: string;
+  messages: ChatMessage[];
+  createdAt: string;
+};
+
+export type TransitionDecision = {
+  id: string;
+  from: TaskState;
+  to: TaskState;
+  allowed: boolean;
+  reason: string;
+  createdAt: string;
+};
+
+export type ValidationResult = {
+  passed: boolean;
+  reason: string;
+  failedInvariants: string[];
+  retryInstruction: string | null;
+  reviewerCount: number;
+  createdAt: string;
+};
+
+export type TaskRun = {
+  context: TaskContext;
+  invariantRefs: string[];
+  artifacts: StageArtifact[];
+  agentRuns: AgentRun[];
+  swarmRuns: SwarmRun[];
+  transitions: TransitionDecision[];
+  validationResult: ValidationResult | null;
+  updatedAt: string;
 };
 
 export type MemoryBranch = {
@@ -64,6 +185,7 @@ export type MemoryDialog = {
   branches: MemoryBranch[];
   compactMetricsSummary: string;
   pendingConfirmation: string | null;
+  taskRun: TaskRun | null;
 };
 
 export type UserProfile = {
@@ -108,6 +230,13 @@ export type RequestContextDebug = {
   recentMessages: ChatMessage[];
   workingMemory: MemoryLayerNote[];
   longTermMemory: MemoryLayerNote[];
+  taskContext: TaskContext | null;
+  invariantRefs: string[];
+  stageAgentInputs: AgentRun[];
+  stagePayloads: StagePayload[];
+  swarmRuns: SwarmRun[];
+  transitionDecisions: TransitionDecision[];
+  validationResult: ValidationResult | null;
   assembledMessages: ChatMessage[];
 };
 
@@ -118,6 +247,7 @@ export type MemoryLayersState = {
   longTermMemory: MemoryLayerNote[];
   activeProfileId: string;
   userProfiles: UserProfile[];
+  invariants: TaskInvariant[];
   pendingProfileUpdates: PendingProfileUpdate[];
   globalMetrics: MemoryMetricTotals;
   lastRequestContext: RequestContextDebug | null;
@@ -132,9 +262,14 @@ type MemoryIndexFile = {
 
 type ShortTermFile = {
   dialogs?: unknown[];
+  invariants?: unknown[];
   globalMetrics?: unknown;
   lastRequestContext?: unknown;
   pendingProfileUpdates?: unknown[];
+};
+
+type TaskInvariantsFile = {
+  invariants?: unknown[];
 };
 
 type UserProfilesFile = {
@@ -158,7 +293,117 @@ const DEFAULT_FILE_SETTINGS: MemoryFileSettings = {
   workingMemoryFileName: "working-memory.md",
   longTermMemoryFileName: "long-term-memory.md",
   userProfilesFileName: "user-profiles.json",
+  invariantsFileName: "task-invariants.json",
 };
+
+const TASK_STATES: TaskState[] = ["planning", "execution", "validation", "done"];
+
+const DEFAULT_INVARIANTS: TaskInvariant[] = [
+  {
+    id: "builtin-ui-english",
+    title: "Host assistant UI language",
+    description:
+      "All visible UI text in this AI Advent Challenge assistant must stay in English. This protects the host assistant UI and does not require arbitrary user-requested artifacts or the user's own message language to be English unless the task explicitly edits this app.",
+    scope: "global",
+    appliesTo: TASK_STATES,
+    severity: "blocker",
+    enabled: true,
+    source: "built-in",
+    createdAt: "built-in",
+    updatedAt: "built-in",
+  },
+  {
+    id: "builtin-unified-assistant",
+    title: "Unified assistant workflow",
+    description:
+      "Keep one unified assistant as the primary workflow; do not reintroduce day tabs as the main experience.",
+    scope: "global",
+    appliesTo: TASK_STATES,
+    severity: "blocker",
+    enabled: true,
+    source: "built-in",
+    createdAt: "built-in",
+    updatedAt: "built-in",
+  },
+  {
+    id: "builtin-automatic-context",
+    title: "Automatic context strategy",
+    description:
+      "The assistant selects topic branches and context strategy automatically; users should not have to choose context strategy manually.",
+    scope: "global",
+    appliesTo: TASK_STATES,
+    severity: "blocker",
+    enabled: true,
+    source: "built-in",
+    createdAt: "built-in",
+    updatedAt: "built-in",
+  },
+  {
+    id: "builtin-profile-boundaries",
+    title: "Profile boundaries",
+    description:
+      "Only the active user profile can define style, format, role/context, and constraints for the current answer.",
+    scope: "global",
+    appliesTo: TASK_STATES,
+    severity: "blocker",
+    enabled: true,
+    source: "built-in",
+    createdAt: "built-in",
+    updatedAt: "built-in",
+  },
+  {
+    id: "builtin-profile-suggestions",
+    title: "Confirmed profile updates",
+    description:
+      "Explicit profile preferences must go through suggested profile updates and must not be duplicated into long-term memory.",
+    scope: "global",
+    appliesTo: TASK_STATES,
+    severity: "blocker",
+    enabled: true,
+    source: "built-in",
+    createdAt: "built-in",
+    updatedAt: "built-in",
+  },
+  {
+    id: "builtin-profile-scoped-context",
+    title: "Profile-scoped branch context",
+    description:
+      "LLM prompts should use only the active profile's selected branch summary and recent selected-branch messages.",
+    scope: "global",
+    appliesTo: TASK_STATES,
+    severity: "blocker",
+    enabled: true,
+    source: "built-in",
+    createdAt: "built-in",
+    updatedAt: "built-in",
+  },
+  {
+    id: "builtin-validation-before-done",
+    title: "Validation before done",
+    description:
+      "A task must not move to Done until validation has passed.",
+    scope: "global",
+    appliesTo: TASK_STATES,
+    severity: "blocker",
+    enabled: true,
+    source: "built-in",
+    createdAt: "built-in",
+    updatedAt: "built-in",
+  },
+  {
+    id: "builtin-file-backed-memory",
+    title: "File-backed memory boundaries",
+    description:
+      "Keep short-term memory in JSON and working/long-term memory in separate editable Markdown files.",
+    scope: "global",
+    appliesTo: TASK_STATES,
+    severity: "warning",
+    enabled: true,
+    source: "built-in",
+    createdAt: "built-in",
+    updatedAt: "built-in",
+  },
+];
 
 function makeId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -207,6 +452,7 @@ function createDialog(index: number): MemoryDialog {
     branches: [branch],
     compactMetricsSummary: "No requests yet.",
     pendingConfirmation: null,
+    taskRun: null,
   };
 }
 
@@ -276,6 +522,7 @@ function normalizeFileSettings(value: unknown): MemoryFileSettings {
       parsed?.userProfilesFileName,
       DEFAULT_FILE_SETTINGS.userProfilesFileName,
     ),
+    invariantsFileName: DEFAULT_FILE_SETTINGS.invariantsFileName,
   };
 }
 
@@ -285,6 +532,7 @@ function resolveFilePaths(settings: MemoryFileSettings): MemoryFilePaths {
     working: path.join(settings.memoryFolder, settings.workingMemoryFileName),
     longTerm: path.join(settings.memoryFolder, settings.longTermMemoryFileName),
     userProfiles: path.join(settings.memoryFolder, settings.userProfilesFileName),
+    invariants: path.join(settings.memoryFolder, settings.invariantsFileName),
     index: MEMORY_INDEX_FILE,
   };
 }
@@ -415,12 +663,444 @@ function normalizeMetricTotals(value: unknown): MemoryMetricTotals {
   };
 }
 
+function normalizeTaskState(value: unknown, fallback: TaskState = "planning"): TaskState {
+  return TASK_STATES.includes(value as TaskState) ? (value as TaskState) : fallback;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    : [];
+}
+
+function normalizeTaskInvariant(value: unknown): TaskInvariant | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<TaskInvariant>;
+  if (
+    typeof candidate.id !== "string" ||
+    typeof candidate.title !== "string" ||
+    typeof candidate.description !== "string" ||
+    !candidate.title.trim() ||
+    !candidate.description.trim()
+  ) {
+    return null;
+  }
+
+  const appliesTo = Array.isArray(candidate.appliesTo)
+    ? candidate.appliesTo
+        .map((stage) => normalizeTaskState(stage, "planning"))
+        .filter((stage, index, stages) => stages.indexOf(stage) === index)
+    : TASK_STATES;
+
+  return {
+    id: candidate.id,
+    title: candidate.title.trim(),
+    description: candidate.description.trim(),
+    scope:
+      candidate.scope === "task" || candidate.scope === "stage"
+        ? candidate.scope
+        : "global",
+    appliesTo: appliesTo.length ? appliesTo : TASK_STATES,
+    severity: candidate.severity === "warning" ? "warning" : "blocker",
+    enabled: candidate.enabled !== false,
+    source:
+      candidate.source === "user" || candidate.source === "task"
+        ? candidate.source
+        : "built-in",
+    createdAt:
+      typeof candidate.createdAt === "string" && candidate.createdAt
+        ? candidate.createdAt
+        : nowIso(),
+    updatedAt:
+      typeof candidate.updatedAt === "string" && candidate.updatedAt
+        ? candidate.updatedAt
+        : nowIso(),
+  };
+}
+
+function normalizeInvariants(value: unknown): TaskInvariant[] {
+  const custom = Array.isArray(value)
+    ? value
+        .map(normalizeTaskInvariant)
+        .filter((invariant): invariant is TaskInvariant => invariant !== null)
+        .filter((invariant) => invariant.source !== "built-in")
+    : [];
+  const byId = new Map<string, TaskInvariant>();
+
+  for (const invariant of DEFAULT_INVARIANTS) {
+    byId.set(invariant.id, invariant);
+  }
+  for (const invariant of custom) {
+    byId.set(invariant.id, invariant);
+  }
+
+  return Array.from(byId.values());
+}
+
+function normalizeInvariantsFile(value: unknown): TaskInvariant[] {
+  if (Array.isArray(value)) {
+    return normalizeInvariants(value);
+  }
+
+  const parsed = value as TaskInvariantsFile;
+  return normalizeInvariants(parsed?.invariants);
+}
+
+function emptyRequirementsContract(): RequirementsContract {
+  return {
+    goal: "",
+    targetLocation: null,
+    requirements: [],
+    constraints: [],
+    assumptions: [],
+    acceptanceCriteria: [],
+    openQuestions: [],
+    readyForApproval: false,
+    updatedAt: nowIso(),
+  };
+}
+
+function isUnknownRequirementValue(value: string) {
+  return /^(unknown|not specified|unspecified|not provided|n\/a|none|null|tbd|to be determined|-+)$/i.test(
+    value.trim(),
+  );
+}
+
+function normalizeRequirementItems(value: unknown) {
+  return normalizeStringArray(value).filter(
+    (item) => !isUnknownRequirementValue(item),
+  );
+}
+
+function normalizeRequirementsContract(value: unknown): RequirementsContract {
+  if (!value || typeof value !== "object") {
+    return emptyRequirementsContract();
+  }
+
+  const candidate = value as Partial<RequirementsContract>;
+  return {
+    goal:
+      typeof candidate.goal === "string" &&
+      !isUnknownRequirementValue(candidate.goal)
+        ? candidate.goal.trim()
+        : "",
+    targetLocation:
+      typeof candidate.targetLocation === "string" &&
+      candidate.targetLocation.trim() &&
+      !isUnknownRequirementValue(candidate.targetLocation)
+        ? candidate.targetLocation.trim()
+        : null,
+    requirements: normalizeRequirementItems(candidate.requirements),
+    constraints: normalizeRequirementItems(candidate.constraints),
+    assumptions: normalizeRequirementItems(candidate.assumptions),
+    acceptanceCriteria: normalizeRequirementItems(candidate.acceptanceCriteria),
+    openQuestions: normalizeRequirementItems(candidate.openQuestions),
+    readyForApproval: candidate.readyForApproval === true,
+    updatedAt:
+      typeof candidate.updatedAt === "string" && candidate.updatedAt
+        ? candidate.updatedAt
+        : nowIso(),
+  };
+}
+
+function normalizeTaskContext(value: unknown): TaskContext | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<TaskContext>;
+  if (typeof candidate.id !== "string" || typeof candidate.task !== "string") {
+    return null;
+  }
+
+  const plan = normalizeStringArray(candidate.plan);
+  const done = normalizeStringArray(candidate.done);
+  const total =
+    typeof candidate.total === "number" && Number.isFinite(candidate.total)
+      ? Math.max(1, Math.round(candidate.total))
+      : Math.max(1, plan.length || 4);
+  const step =
+    typeof candidate.step === "number" && Number.isFinite(candidate.step)
+      ? Math.min(total, Math.max(1, Math.round(candidate.step)))
+      : 1;
+
+  return {
+    id: candidate.id,
+    task: candidate.task.trim() || "Untitled task",
+    state: normalizeTaskState(candidate.state),
+    step,
+    total,
+    plan,
+    done,
+    current: typeof candidate.current === "string" ? candidate.current : "",
+    pausedReason:
+      typeof candidate.pausedReason === "string" && candidate.pausedReason.trim()
+        ? candidate.pausedReason.trim()
+        : null,
+    awaitingPlanApproval: candidate.awaitingPlanApproval === true,
+    requirementsContract: normalizeRequirementsContract(
+      candidate.requirementsContract,
+    ),
+    startedAt:
+      typeof candidate.startedAt === "string" && candidate.startedAt
+        ? candidate.startedAt
+        : nowIso(),
+    updatedAt:
+      typeof candidate.updatedAt === "string" && candidate.updatedAt
+        ? candidate.updatedAt
+        : nowIso(),
+  };
+}
+
+function normalizeStageArtifact(value: unknown): StageArtifact | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<StageArtifact>;
+  if (typeof candidate.id !== "string" || typeof candidate.content !== "string") {
+    return null;
+  }
+
+  return {
+    id: candidate.id,
+    stage: normalizeTaskState(candidate.stage),
+    title:
+      typeof candidate.title === "string" && candidate.title.trim()
+        ? candidate.title.trim()
+        : "Stage artifact",
+    content: candidate.content,
+    summary:
+      typeof candidate.summary === "string" && candidate.summary.trim()
+        ? candidate.summary.trim()
+        : candidate.content.slice(0, 180),
+    createdAt:
+      typeof candidate.createdAt === "string" && candidate.createdAt
+        ? candidate.createdAt
+        : nowIso(),
+  };
+}
+
+function normalizeAgentRun(value: unknown): AgentRun | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<AgentRun>;
+  if (
+    typeof candidate.id !== "string" ||
+    typeof candidate.agentId !== "string" ||
+    typeof candidate.output !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    id: candidate.id,
+    agentId: candidate.agentId,
+    stage: normalizeTaskState(candidate.stage),
+    role:
+      typeof candidate.role === "string" && candidate.role.trim()
+        ? candidate.role.trim()
+        : candidate.agentId,
+    inputSummary:
+      typeof candidate.inputSummary === "string" ? candidate.inputSummary : "",
+    output: candidate.output,
+    findings: normalizeStringArray(candidate.findings),
+    confidence:
+      typeof candidate.confidence === "number" &&
+      Number.isFinite(candidate.confidence)
+        ? Math.max(0, Math.min(1, candidate.confidence))
+        : 0,
+    createdAt:
+      typeof candidate.createdAt === "string" && candidate.createdAt
+        ? candidate.createdAt
+        : nowIso(),
+  };
+}
+
+function normalizeSwarmRun(value: unknown): SwarmRun | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<SwarmRun>;
+  if (typeof candidate.id !== "string") {
+    return null;
+  }
+
+  const outputs = Array.isArray(candidate.outputs)
+    ? candidate.outputs
+        .map(normalizeAgentRun)
+        .filter((run): run is AgentRun => run !== null)
+    : [];
+
+  return {
+    id: candidate.id,
+    stage: normalizeTaskState(candidate.stage),
+    agentIds: normalizeStringArray(candidate.agentIds),
+    outputs,
+    aggregatedDecision:
+      typeof candidate.aggregatedDecision === "string"
+        ? candidate.aggregatedDecision
+        : "",
+    createdAt:
+      typeof candidate.createdAt === "string" && candidate.createdAt
+        ? candidate.createdAt
+        : nowIso(),
+  };
+}
+
+function normalizeStagePayload(value: unknown): StagePayload | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<StagePayload>;
+  if (
+    typeof candidate.id !== "string" ||
+    typeof candidate.agentId !== "string" ||
+    typeof candidate.role !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    id: candidate.id,
+    stage: normalizeTaskState(candidate.stage),
+    agentId: candidate.agentId,
+    role: candidate.role,
+    messages: Array.isArray(candidate.messages)
+      ? candidate.messages.filter(isChatMessage)
+      : [],
+    createdAt:
+      typeof candidate.createdAt === "string" && candidate.createdAt
+        ? candidate.createdAt
+        : nowIso(),
+  };
+}
+
+function normalizeTransitionDecision(value: unknown): TransitionDecision | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<TransitionDecision>;
+  if (typeof candidate.id !== "string") {
+    return null;
+  }
+
+  return {
+    id: candidate.id,
+    from: normalizeTaskState(candidate.from),
+    to: normalizeTaskState(candidate.to),
+    allowed: candidate.allowed === true,
+    reason: typeof candidate.reason === "string" ? candidate.reason : "",
+    createdAt:
+      typeof candidate.createdAt === "string" && candidate.createdAt
+        ? candidate.createdAt
+        : nowIso(),
+  };
+}
+
+function normalizeValidationResult(value: unknown): ValidationResult | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<ValidationResult>;
+  if (typeof candidate.passed !== "boolean") {
+    return null;
+  }
+
+  return {
+    passed: candidate.passed,
+    reason: typeof candidate.reason === "string" ? candidate.reason : "",
+    failedInvariants: normalizeStringArray(candidate.failedInvariants),
+    retryInstruction:
+      typeof candidate.retryInstruction === "string" &&
+      candidate.retryInstruction.trim()
+        ? candidate.retryInstruction.trim()
+        : null,
+    reviewerCount:
+      typeof candidate.reviewerCount === "number" &&
+      Number.isFinite(candidate.reviewerCount)
+        ? Math.max(0, Math.round(candidate.reviewerCount))
+        : 0,
+    createdAt:
+      typeof candidate.createdAt === "string" && candidate.createdAt
+        ? candidate.createdAt
+        : nowIso(),
+  };
+}
+
+function normalizeTaskRun(value: unknown): TaskRun | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<TaskRun> & {
+    invariants?: unknown[];
+  };
+  const context = normalizeTaskContext(candidate.context);
+  if (!context) {
+    return null;
+  }
+
+  return {
+    context,
+    invariantRefs: Array.isArray(candidate.invariantRefs)
+      ? candidate.invariantRefs.filter(
+          (item): item is string => typeof item === "string",
+        )
+      : Array.isArray(candidate.invariants)
+        ? candidate.invariants
+            .map(normalizeTaskInvariant)
+            .filter((invariant): invariant is TaskInvariant => invariant !== null)
+            .map((invariant) => invariant.id)
+        : [],
+    artifacts: Array.isArray(candidate.artifacts)
+      ? candidate.artifacts
+          .map(normalizeStageArtifact)
+          .filter((artifact): artifact is StageArtifact => artifact !== null)
+      : [],
+    agentRuns: Array.isArray(candidate.agentRuns)
+      ? candidate.agentRuns
+          .map(normalizeAgentRun)
+          .filter((run): run is AgentRun => run !== null)
+      : [],
+    swarmRuns: Array.isArray(candidate.swarmRuns)
+      ? candidate.swarmRuns
+          .map(normalizeSwarmRun)
+          .filter((run): run is SwarmRun => run !== null)
+      : [],
+    transitions: Array.isArray(candidate.transitions)
+      ? candidate.transitions
+          .map(normalizeTransitionDecision)
+          .filter((decision): decision is TransitionDecision => decision !== null)
+      : [],
+    validationResult: normalizeValidationResult(candidate.validationResult),
+    updatedAt:
+      typeof candidate.updatedAt === "string" && candidate.updatedAt
+        ? candidate.updatedAt
+        : nowIso(),
+  };
+}
+
 function normalizeRequestContextDebug(value: unknown): RequestContextDebug | null {
   if (!value || typeof value !== "object") {
     return null;
   }
 
-  const candidate = value as Partial<RequestContextDebug>;
+  const candidate = value as Partial<RequestContextDebug> & {
+    invariants?: unknown[];
+  };
   const profile = normalizeProfile(candidate.profile, 1);
   if (!profile) {
     return null;
@@ -449,6 +1129,38 @@ function normalizeRequestContextDebug(value: unknown): RequestContextDebug | nul
     longTermMemory: Array.isArray(candidate.longTermMemory)
       ? candidate.longTermMemory.filter(isMemoryLayerNote)
       : [],
+    taskContext: normalizeTaskContext(candidate.taskContext),
+    invariantRefs: Array.isArray(candidate.invariantRefs)
+      ? candidate.invariantRefs.filter(
+          (item): item is string => typeof item === "string",
+        )
+      : Array.isArray(candidate.invariants)
+        ? candidate.invariants
+            .map(normalizeTaskInvariant)
+            .filter((invariant): invariant is TaskInvariant => invariant !== null)
+            .map((invariant) => invariant.id)
+        : [],
+    stageAgentInputs: Array.isArray(candidate.stageAgentInputs)
+      ? candidate.stageAgentInputs
+          .map(normalizeAgentRun)
+          .filter((run): run is AgentRun => run !== null)
+      : [],
+    stagePayloads: Array.isArray(candidate.stagePayloads)
+      ? candidate.stagePayloads
+          .map(normalizeStagePayload)
+          .filter((payload): payload is StagePayload => payload !== null)
+      : [],
+    swarmRuns: Array.isArray(candidate.swarmRuns)
+      ? candidate.swarmRuns
+          .map(normalizeSwarmRun)
+          .filter((run): run is SwarmRun => run !== null)
+      : [],
+    transitionDecisions: Array.isArray(candidate.transitionDecisions)
+      ? candidate.transitionDecisions
+          .map(normalizeTransitionDecision)
+          .filter((decision): decision is TransitionDecision => decision !== null)
+      : [],
+    validationResult: normalizeValidationResult(candidate.validationResult),
     assembledMessages: Array.isArray(candidate.assembledMessages)
       ? candidate.assembledMessages.filter(isChatMessage)
       : [],
@@ -610,9 +1322,32 @@ function normalizeDialogs(value: unknown): MemoryDialog[] {
               dialog.pendingConfirmation.trim()
                 ? dialog.pendingConfirmation
                 : null,
+            taskRun: normalizeTaskRun(dialog.taskRun),
           };
         })
     : [];
+}
+
+function legacyTaskRunInvariants(value: unknown): TaskInvariant[] {
+  const parsed = value as Partial<ShortTermFile>;
+  if (!Array.isArray(parsed.dialogs)) {
+    return [];
+  }
+
+  return parsed.dialogs
+    .flatMap((dialog) => {
+      if (!dialog || typeof dialog !== "object") {
+        return [];
+      }
+      const taskRun = (dialog as Record<string, unknown>).taskRun;
+      if (!taskRun || typeof taskRun !== "object") {
+        return [];
+      }
+      const invariants = (taskRun as Record<string, unknown>).invariants;
+      return Array.isArray(invariants) ? invariants : [];
+    })
+    .map(normalizeTaskInvariant)
+    .filter((invariant): invariant is TaskInvariant => invariant !== null);
 }
 
 async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
@@ -623,6 +1358,19 @@ async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {
       return fallback;
+    }
+    throw error;
+  }
+}
+
+async function readOptionalJsonFile<T>(filePath: string): Promise<T | null> {
+  try {
+    const raw = await readFile(filePath, "utf8");
+    return JSON.parse(raw) as T;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return null;
     }
     throw error;
   }
@@ -693,6 +1441,9 @@ export async function readMemoryLayersState(): Promise<MemoryLayersState> {
   const fileSettings = normalizeFileSettings(index.fileSettings);
   const filePaths = resolveFilePaths(fileSettings);
   const shortTerm = await readJsonFile<ShortTermFile>(filePaths.shortTerm, {});
+  const invariantsFile = await readOptionalJsonFile<TaskInvariantsFile | unknown[]>(
+    filePaths.invariants,
+  );
   const profileFile = await readJsonFile<UserProfilesFile>(
     filePaths.userProfiles,
     {},
@@ -701,6 +1452,15 @@ export async function readMemoryLayersState(): Promise<MemoryLayersState> {
   const profiles = normalizeProfiles(profileFile);
   const globalMetrics = normalizeMetricTotals(shortTerm.globalMetrics);
   const lastRequestContext = normalizeRequestContextDebug(shortTerm.lastRequestContext);
+  const storedInvariants =
+    invariantsFile === null
+      ? normalizeInvariants(shortTerm.invariants)
+      : normalizeInvariantsFile(invariantsFile);
+  const invariantMap = new Map<string, TaskInvariant>();
+  for (const invariant of [...storedInvariants, ...legacyTaskRunInvariants(shortTerm)]) {
+    invariantMap.set(invariant.id, invariant);
+  }
+  const invariants = Array.from(invariantMap.values());
   const pendingProfileUpdates = Array.isArray(shortTerm.pendingProfileUpdates)
     ? shortTerm.pendingProfileUpdates
         .map(normalizePendingProfileUpdate)
@@ -720,6 +1480,7 @@ export async function readMemoryLayersState(): Promise<MemoryLayersState> {
     longTermMemory: parseMarkdownNotes(longTermMarkdown, fileSettings.longTermMemoryFileName),
     activeProfileId: profiles.activeProfileId,
     userProfiles: profiles.userProfiles,
+    invariants,
     pendingProfileUpdates,
     globalMetrics,
     lastRequestContext,
@@ -751,6 +1512,17 @@ export async function writeMemoryLayersState(state: MemoryLayersState) {
         globalMetrics: state.globalMetrics,
         lastRequestContext: state.lastRequestContext,
         pendingProfileUpdates: state.pendingProfileUpdates,
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await writeFile(
+    state.filePaths.invariants,
+    JSON.stringify(
+      {
+        invariants: state.invariants,
       },
       null,
       2,
@@ -832,6 +1604,7 @@ export async function moveMemoryFolder(
     [state.filePaths.working, nextFilePaths.working],
     [state.filePaths.longTerm, nextFilePaths.longTerm],
     [state.filePaths.userProfiles, nextFilePaths.userProfiles],
+    [state.filePaths.invariants, nextFilePaths.invariants],
   ] as const;
 
   await mkdir(fileSettings.memoryFolder, { recursive: true });
@@ -1129,6 +1902,90 @@ export function deleteUserProfile(
     userProfiles,
     pendingProfileUpdates: state.pendingProfileUpdates.filter(
       (update) => update.profileId !== profileId,
+    ),
+  };
+}
+
+export function createTaskInvariant(
+  state: MemoryLayersState,
+  invariant: Partial<TaskInvariant>,
+): MemoryLayersState {
+  const now = nowIso();
+  const title = invariant.title?.trim() || "Project invariant";
+  const description = invariant.description?.trim() || title;
+  const appliesTo =
+    Array.isArray(invariant.appliesTo) && invariant.appliesTo.length
+      ? invariant.appliesTo.map((stage) => normalizeTaskState(stage))
+      : TASK_STATES;
+  const nextInvariant: TaskInvariant = {
+    id: makeId("task-invariant"),
+    title,
+    description,
+    scope:
+      invariant.scope === "task" || invariant.scope === "stage"
+        ? invariant.scope
+        : "global",
+    appliesTo: Array.from(new Set(appliesTo)),
+    severity: invariant.severity === "warning" ? "warning" : "blocker",
+    enabled: invariant.enabled !== false,
+    source: "user",
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  return {
+    ...state,
+    invariants: [...state.invariants, nextInvariant],
+  };
+}
+
+export function updateTaskInvariant(
+  state: MemoryLayersState,
+  invariant: Partial<TaskInvariant> & { id: string },
+): MemoryLayersState {
+  return {
+    ...state,
+    invariants: state.invariants.map((item) => {
+      if (item.id !== invariant.id || item.source === "built-in") {
+        return item;
+      }
+
+      const appliesTo =
+        Array.isArray(invariant.appliesTo) && invariant.appliesTo.length
+          ? Array.from(
+              new Set(invariant.appliesTo.map((stage) => normalizeTaskState(stage))),
+            )
+          : item.appliesTo;
+
+      return {
+        ...item,
+        title: invariant.title?.trim() || item.title,
+        description: invariant.description?.trim() || item.description,
+        scope:
+          invariant.scope === "task" || invariant.scope === "stage"
+            ? invariant.scope
+            : item.scope,
+        appliesTo,
+        severity:
+          invariant.severity === "warning" || invariant.severity === "blocker"
+            ? invariant.severity
+            : item.severity,
+        enabled: invariant.enabled ?? item.enabled,
+        updatedAt: nowIso(),
+      };
+    }),
+  };
+}
+
+export function deleteTaskInvariant(
+  state: MemoryLayersState,
+  invariantId: string,
+): MemoryLayersState {
+  return {
+    ...state,
+    invariants: state.invariants.filter(
+      (invariant) =>
+        invariant.id !== invariantId || invariant.source === "built-in",
     ),
   };
 }

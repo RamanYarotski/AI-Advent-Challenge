@@ -93,6 +93,7 @@ type MemoryFileSettings = {
   workingMemoryFileName: string;
   longTermMemoryFileName: string;
   userProfilesFileName: string;
+  invariantsFileName: string;
 };
 
 type MemoryFilePaths = {
@@ -100,6 +101,7 @@ type MemoryFilePaths = {
   working: string;
   longTerm: string;
   userProfiles: string;
+  invariants: string;
   index: string;
 };
 
@@ -119,9 +121,124 @@ type MemoryLayerEvent = {
     | "selected_branch"
     | "created_branch"
     | "updated_summary"
-    | "prompt_context";
+    | "prompt_context"
+    | "task_state"
+    | "agent_run"
+    | "transition"
+    | "invariant_check";
   detail: string;
   filePath: string;
+};
+
+type TaskState = "planning" | "execution" | "validation" | "done";
+
+type TaskInvariant = {
+  id: string;
+  title: string;
+  description: string;
+  scope: "global" | "task" | "stage";
+  appliesTo: TaskState[];
+  severity: "blocker" | "warning";
+  enabled: boolean;
+  source: "built-in" | "user" | "task";
+  createdAt: string;
+  updatedAt: string;
+};
+
+type RequirementsContract = {
+  goal: string;
+  targetLocation: string | null;
+  requirements: string[];
+  constraints: string[];
+  assumptions: string[];
+  acceptanceCriteria: string[];
+  openQuestions: string[];
+  readyForApproval: boolean;
+  updatedAt: string;
+};
+
+type TaskContext = {
+  id: string;
+  task: string;
+  state: TaskState;
+  step: number;
+  total: number;
+  plan: string[];
+  done: string[];
+  current: string;
+  pausedReason: string | null;
+  awaitingPlanApproval: boolean;
+  requirementsContract: RequirementsContract;
+  startedAt: string;
+  updatedAt: string;
+};
+
+type StageArtifact = {
+  id: string;
+  stage: TaskState;
+  title: string;
+  content: string;
+  summary: string;
+  createdAt: string;
+};
+
+type AgentRun = {
+  id: string;
+  agentId: string;
+  stage: TaskState;
+  role: string;
+  inputSummary: string;
+  output: string;
+  findings: string[];
+  confidence: number;
+  createdAt: string;
+};
+
+type SwarmRun = {
+  id: string;
+  stage: TaskState;
+  agentIds: string[];
+  outputs: AgentRun[];
+  aggregatedDecision: string;
+  createdAt: string;
+};
+
+type StagePayload = {
+  id: string;
+  stage: TaskState;
+  agentId: string;
+  role: string;
+  messages: ChatMessage[];
+  createdAt: string;
+};
+
+type TransitionDecision = {
+  id: string;
+  from: TaskState;
+  to: TaskState;
+  allowed: boolean;
+  reason: string;
+  createdAt: string;
+};
+
+type ValidationResult = {
+  passed: boolean;
+  reason: string;
+  failedInvariants: string[];
+  retryInstruction: string | null;
+  reviewerCount: number;
+  createdAt: string;
+};
+
+type TaskRun = {
+  context: TaskContext;
+  invariantRefs: string[];
+  artifacts: StageArtifact[];
+  agentRuns: AgentRun[];
+  swarmRuns: SwarmRun[];
+  transitions: TransitionDecision[];
+  validationResult: ValidationResult | null;
+  updatedAt: string;
 };
 
 type UserProfile = {
@@ -166,6 +283,13 @@ type RequestContextDebug = {
   recentMessages: ChatMessage[];
   workingMemory: MemoryLayerNote[];
   longTermMemory: MemoryLayerNote[];
+  taskContext: TaskContext | null;
+  invariantRefs: string[];
+  stageAgentInputs: AgentRun[];
+  stagePayloads: StagePayload[];
+  swarmRuns: SwarmRun[];
+  transitionDecisions: TransitionDecision[];
+  validationResult: ValidationResult | null;
   assembledMessages: ChatMessage[];
 };
 
@@ -183,6 +307,7 @@ type MemoryDialog = Omit<TokenDialog, "branches"> & {
   branches: MemoryBranch[];
   compactMetricsSummary: string;
   pendingConfirmation: string | null;
+  taskRun: TaskRun | null;
 };
 
 type MemoryLayersState = {
@@ -192,6 +317,7 @@ type MemoryLayersState = {
   longTermMemory: MemoryLayerNote[];
   activeProfileId: string;
   userProfiles: UserProfile[];
+  invariants: TaskInvariant[];
   pendingProfileUpdates: PendingProfileUpdate[];
   globalMetrics: MemoryMetricTotals;
   lastRequestContext: RequestContextDebug | null;
@@ -512,7 +638,10 @@ async function runMemoryLayersAction(input: {
     | "apply_profile_update"
     | "dismiss_profile_update"
     | "apply_all_profile_updates"
-    | "dismiss_all_profile_updates";
+    | "dismiss_all_profile_updates"
+    | "create_invariant"
+    | "update_invariant"
+    | "delete_invariant";
   dialogId?: string;
   title?: string;
   prompt?: string;
@@ -522,6 +651,8 @@ async function runMemoryLayersAction(input: {
   profileId?: string;
   profileUpdateId?: string;
   profile?: Partial<UserProfile>;
+  invariantId?: string;
+  invariant?: Partial<TaskInvariant>;
 }) {
   const response = await fetch("/api/agent/memory-layers", {
     method: "POST",
@@ -1120,6 +1251,27 @@ export default function Home() {
     void updateMemoryLayersLab({ action: "dismiss_all_profile_updates", profileId });
   }
 
+  function createInvariant(invariant: Partial<TaskInvariant>) {
+    void updateMemoryLayersLab({
+      action: "create_invariant",
+      invariant,
+    });
+  }
+
+  function updateInvariant(invariant: Partial<TaskInvariant> & { id: string }) {
+    void updateMemoryLayersLab({
+      action: "update_invariant",
+      invariant,
+    });
+  }
+
+  function deleteInvariant(invariantId: string) {
+    void updateMemoryLayersLab({
+      action: "delete_invariant",
+      invariantId,
+    });
+  }
+
   async function sendMemoryLayersMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
@@ -1537,6 +1689,9 @@ Solve the task as a group of experts:
               model={model}
               onCreate={createMemoryLayersDialog}
               onDelete={deleteMemoryLayersDialog}
+              onInvariantCreate={createInvariant}
+              onInvariantDelete={deleteInvariant}
+              onInvariantUpdate={updateInvariant}
               onModelChange={setModel}
               onRename={renameMemoryLayersDialog}
               onSelect={setActiveMemoryLayersDialog}
@@ -1780,6 +1935,7 @@ function MemoryFileSettingsForm({
         <span>Working: {filePaths.working}</span>
         <span>Long-term: {filePaths.longTerm}</span>
         <span>Profiles: {filePaths.userProfiles}</span>
+        <span>Invariants: {filePaths.invariants}</span>
       </div>
       <p className="settings-note">
         File names are fixed. The move is blocked if a target memory file already exists.
@@ -1788,7 +1944,13 @@ function MemoryFileSettingsForm({
   );
 }
 
-type SettingsSection = "profile" | "location" | "memory" | "metrics" | "context";
+type SettingsSection =
+  | "profile"
+  | "invariants"
+  | "location"
+  | "memory"
+  | "metrics"
+  | "context";
 
 function activeProfileFrom(lab: MemoryLayersState) {
   return (
@@ -1801,6 +1963,9 @@ function AssistantSettingsModal({
   lab,
   loading,
   onClose,
+  onInvariantCreate,
+  onInvariantDelete,
+  onInvariantUpdate,
   onMemoryFolderMove,
   onProfileApplySuggestion,
   onProfileApplySuggestions,
@@ -1815,6 +1980,9 @@ function AssistantSettingsModal({
   lab: MemoryLayersState;
   loading: boolean;
   onClose: () => void;
+  onInvariantCreate: (invariant: Partial<TaskInvariant>) => void;
+  onInvariantDelete: (invariantId: string) => void;
+  onInvariantUpdate: (invariant: Partial<TaskInvariant> & { id: string }) => void;
   onMemoryFolderMove: (memoryFolder: string) => void;
   onProfileApplySuggestion: (profileUpdateId: string) => void;
   onProfileApplySuggestions: (profileId: string) => void;
@@ -1830,6 +1998,7 @@ function AssistantSettingsModal({
   const activeProfile = activeProfileFrom(lab);
   const sections: Array<{ id: SettingsSection; label: string }> = [
     { id: "profile", label: "Profile" },
+    { id: "invariants", label: "Invariants" },
     { id: "location", label: "Memory location" },
     { id: "memory", label: "Saved memory" },
     { id: "metrics", label: "Metrics" },
@@ -1898,6 +2067,15 @@ function AssistantSettingsModal({
               onSubmit={onMemoryFolderMove}
             />
           )}
+          {section === "invariants" && (
+            <InvariantsSettingsPage
+              invariants={lab.invariants}
+              loading={loading}
+              onCreate={onInvariantCreate}
+              onDelete={onInvariantDelete}
+              onUpdate={onInvariantUpdate}
+            />
+          )}
           {section === "memory" && (
             <SavedMemorySettingsPage lab={lab} />
           )}
@@ -1905,7 +2083,10 @@ function AssistantSettingsModal({
             <MetricsSettingsPage totals={lab.globalMetrics} />
           )}
           {section === "context" && (
-            <RequestContextSettingsPage context={lab.lastRequestContext} />
+            <RequestContextSettingsPage
+              context={lab.lastRequestContext}
+              invariants={lab.invariants}
+            />
           )}
         </div>
       </section>
@@ -2149,6 +2330,201 @@ function ProfileSettingsPage({
   );
 }
 
+function InvariantsSettingsPage({
+  invariants,
+  loading,
+  onCreate,
+  onDelete,
+  onUpdate,
+}: {
+  invariants: TaskInvariant[];
+  loading: boolean;
+  onCreate: (invariant: Partial<TaskInvariant>) => void;
+  onDelete: (invariantId: string) => void;
+  onUpdate: (invariant: Partial<TaskInvariant> & { id: string }) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [scope, setScope] = useState<TaskInvariant["scope"]>("global");
+  const [severity, setSeverity] =
+    useState<TaskInvariant["severity"]>("blocker");
+  const [appliesTo, setAppliesTo] = useState<TaskState[]>([
+    "planning",
+    "execution",
+    "validation",
+    "done",
+  ]);
+
+  function toggleStage(stage: TaskState) {
+    setAppliesTo((current) =>
+      current.includes(stage)
+        ? current.filter((item) => item !== stage)
+        : [...current, stage],
+    );
+  }
+
+  function submitInvariant(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const cleanTitle = title.trim();
+    const cleanDescription = description.trim();
+    if (!cleanTitle || !cleanDescription || appliesTo.length === 0) {
+      return;
+    }
+    onCreate({
+      title: cleanTitle,
+      description: cleanDescription,
+      scope,
+      severity,
+      appliesTo,
+      enabled: true,
+    });
+    setTitle("");
+    setDescription("");
+  }
+
+  function editInvariant(invariant: TaskInvariant) {
+    const nextTitle = window.prompt("Invariant title", invariant.title)?.trim();
+    if (!nextTitle) {
+      return;
+    }
+    const nextDescription = window
+      .prompt("Invariant description", invariant.description)
+      ?.trim();
+    if (!nextDescription) {
+      return;
+    }
+    onUpdate({
+      id: invariant.id,
+      title: nextTitle,
+      description: nextDescription,
+    });
+  }
+
+  return (
+    <section className="settings-page invariants-settings">
+      <div className="settings-page-head">
+        <h3>Invariants</h3>
+        <p>Rules injected into task stage agents and validation.</p>
+      </div>
+      <form className="invariant-form" onSubmit={submitInvariant}>
+        <label>
+          Title
+          <input
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder="No Java"
+            value={title}
+          />
+        </label>
+        <label>
+          Description
+          <textarea
+            onChange={(event) => setDescription(event.target.value)}
+            placeholder="Do not suggest Java for this project."
+            rows={3}
+            value={description}
+          />
+        </label>
+        <div className="invariant-controls">
+          <label>
+            Scope
+            <select
+              onChange={(event) =>
+                setScope(event.target.value as TaskInvariant["scope"])
+              }
+              value={scope}
+            >
+              <option value="global">Global</option>
+              <option value="task">Task</option>
+              <option value="stage">Stage</option>
+            </select>
+          </label>
+          <label>
+            Severity
+            <select
+              onChange={(event) =>
+                setSeverity(event.target.value as TaskInvariant["severity"])
+              }
+              value={severity}
+            >
+              <option value="blocker">Blocker</option>
+              <option value="warning">Warning</option>
+            </select>
+          </label>
+        </div>
+        <fieldset className="stage-checkboxes">
+          <legend>Stages</legend>
+          {(["planning", "execution", "validation", "done"] as TaskState[]).map(
+            (stage) => (
+              <label key={stage}>
+                <input
+                  checked={appliesTo.includes(stage)}
+                  onChange={() => toggleStage(stage)}
+                  type="checkbox"
+                />
+                {taskStateTitle(stage)}
+              </label>
+            ),
+          )}
+        </fieldset>
+        <button className="run" disabled={loading} type="submit">
+          Add invariant
+        </button>
+      </form>
+      <div className="invariant-list">
+        {invariants.map((invariant) => (
+          <article className="invariant-card" key={invariant.id}>
+            <div>
+              <span>
+                {invariant.source} / {invariant.severity}
+              </span>
+              <strong>{invariant.title}</strong>
+            </div>
+            <p>{invariant.description}</p>
+            <small>
+              {invariant.scope} / {invariant.appliesTo.map(taskStateTitle).join(", ")}
+            </small>
+            <div className="settings-actions">
+              {invariant.source !== "built-in" && (
+                <>
+                  <button
+                    className="secondary-action"
+                    disabled={loading}
+                    onClick={() =>
+                      onUpdate({
+                        id: invariant.id,
+                        enabled: !invariant.enabled,
+                      })
+                    }
+                    type="button"
+                  >
+                    {invariant.enabled ? "Disable" : "Enable"}
+                  </button>
+                  <button
+                    className="secondary-action"
+                    disabled={loading}
+                    onClick={() => editInvariant(invariant)}
+                    type="button"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    className="danger-action"
+                    disabled={loading}
+                    onClick={() => onDelete(invariant.id)}
+                    type="button"
+                  >
+                    Delete
+                  </button>
+                </>
+              )}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function profileFieldLabel(field: UserProfileField) {
   if (field === "roleContext") {
     return "Role / context";
@@ -2229,8 +2605,10 @@ function MetricsSettingsPage({
 
 function RequestContextSettingsPage({
   context,
+  invariants,
 }: {
   context: RequestContextDebug | null;
+  invariants: TaskInvariant[];
 }) {
   if (!context) {
     return (
@@ -2283,6 +2661,34 @@ function RequestContextSettingsPage({
         value={formatDebugNotes(context.longTermMemory)}
       />
       <RequestContextBlock
+        title="Task context"
+        value={formatDebugTaskContext(context.taskContext)}
+      />
+      <RequestContextBlock
+        title="Active invariants"
+        value={formatDebugInvariantRefs(context.invariantRefs, invariants)}
+      />
+      <RequestContextBlock
+        title="Stage agent runs"
+        value={formatDebugAgentRuns(context.stageAgentInputs)}
+      />
+      <RequestContextBlock
+        title="Stage payload messages"
+        value={formatDebugStagePayloads(context.stagePayloads)}
+      />
+      <RequestContextBlock
+        title="Swarm runs"
+        value={formatDebugSwarmRuns(context.swarmRuns)}
+      />
+      <RequestContextBlock
+        title="Transition decisions"
+        value={formatDebugTransitions(context.transitionDecisions)}
+      />
+      <RequestContextBlock
+        title="Validation result"
+        value={formatDebugValidation(context.validationResult)}
+      />
+      <RequestContextBlock
         title="Full assembled messages"
         value={formatDebugMessages(context.assembledMessages)}
       />
@@ -2323,6 +2729,275 @@ function formatDebugNotes(notes: MemoryLayerNote[]) {
   return notes.map((note) => `- ${note.text}`).join("\n");
 }
 
+function formatDebugTaskContext(context: TaskContext | null) {
+  if (!context) {
+    return "- empty";
+  }
+
+  const contract = context.requirementsContract;
+  return [
+    `Task: ${context.task}`,
+    `State: ${context.state}`,
+    `Step: ${context.step}/${context.total}`,
+    `Current: ${context.current || "- empty"}`,
+    `Plan: ${context.plan.length ? context.plan.join(" -> ") : "- empty"}`,
+    `Done: ${context.done.length ? context.done.join("; ") : "- empty"}`,
+    `Paused: ${context.pausedReason || "- none"}`,
+    `Awaiting plan approval: ${context.awaitingPlanApproval ? "yes" : "no"}`,
+    "",
+    "Requirements contract:",
+    `Goal: ${contract?.goal || "- empty"}`,
+    `Target/location: ${contract?.targetLocation || "- empty"}`,
+    `Requirements: ${
+      contract?.requirements.length ? contract.requirements.join("; ") : "- empty"
+    }`,
+    `Constraints: ${
+      contract?.constraints.length ? contract.constraints.join("; ") : "- empty"
+    }`,
+    `Assumptions: ${
+      contract?.assumptions.length ? contract.assumptions.join("; ") : "- empty"
+    }`,
+    `Acceptance criteria: ${
+      contract?.acceptanceCriteria.length
+        ? contract.acceptanceCriteria.join("; ")
+        : "- empty"
+    }`,
+    `Open questions: ${
+      contract?.openQuestions.length
+        ? contract.openQuestions.join("; ")
+        : "- empty"
+    }`,
+    `Ready for approval: ${contract?.readyForApproval ? "yes" : "no"}`,
+  ].join("\n");
+}
+
+function formatDebugInvariants(invariants: TaskInvariant[]) {
+  if (!invariants.length) {
+    return "- empty";
+  }
+
+  return invariants
+    .map(
+      (invariant) =>
+        `- [${invariant.enabled ? "on" : "off"}] ${invariant.title} (${invariant.severity}, ${invariant.source})\n  ${invariant.description}`,
+    )
+    .join("\n");
+}
+
+function formatDebugInvariantRefs(refs: string[], invariants: TaskInvariant[]) {
+  if (!refs.length) {
+    return "- empty";
+  }
+
+  const byId = new Map(invariants.map((invariant) => [invariant.id, invariant]));
+  return refs
+    .map((ref) => byId.get(ref))
+    .map((invariant, index) =>
+      invariant
+        ? `- [${invariant.enabled ? "on" : "off"}] ${invariant.title} (${invariant.severity}, ${invariant.source})\n  ${invariant.description}`
+        : `- ${refs[index]}`,
+    )
+    .join("\n");
+}
+
+function formatDebugAgentRuns(runs: AgentRun[]) {
+  if (!runs.length) {
+    return "- empty";
+  }
+
+  return runs
+    .map(
+      (run, index) =>
+        `${index + 1}. ${run.role} (${run.agentId})\nStage: ${run.stage}\nFindings: ${
+          run.findings.length ? run.findings.join("; ") : "- empty"
+        }\nOutput:\n${run.output}`,
+    )
+    .join("\n\n");
+}
+
+function formatDebugStagePayloads(payloads: StagePayload[]) {
+  if (!payloads.length) {
+    return "- empty";
+  }
+
+  return payloads
+    .map(
+      (payload, index) =>
+        [
+          `${index + 1}. ${payload.role} (${payload.agentId})`,
+          `Stage: ${payload.stage}`,
+          formatDebugMessages(payload.messages),
+        ].join("\n"),
+    )
+    .join("\n\n");
+}
+
+function formatDebugSwarmRuns(runs: SwarmRun[]) {
+  if (!runs.length) {
+    return "- empty";
+  }
+
+  return runs
+    .map(
+      (run, index) =>
+        `${index + 1}. ${run.stage}\nAgents: ${run.agentIds.join(", ")}\n${run.aggregatedDecision}`,
+    )
+    .join("\n\n");
+}
+
+function formatDebugTransitions(transitions: TransitionDecision[]) {
+  if (!transitions.length) {
+    return "- empty";
+  }
+
+  return transitions
+    .map(
+      (transition) =>
+        `- ${transition.from} -> ${transition.to}: ${
+          transition.allowed ? "allowed" : "blocked"
+        }\n  ${transition.reason}`,
+    )
+    .join("\n");
+}
+
+function formatDebugValidation(result: ValidationResult | null) {
+  if (!result) {
+    return "- empty";
+  }
+
+  return [
+    `Status: ${result.passed ? "passed" : "failed"}`,
+    `Reason: ${result.reason}`,
+    `Failed invariants: ${
+      result.failedInvariants.length ? result.failedInvariants.join(", ") : "none"
+    }`,
+    `Retry: ${result.retryInstruction || "- none"}`,
+    `Reviewers: ${result.reviewerCount}`,
+  ].join("\n");
+}
+
+function taskStateTitle(state: TaskState) {
+  return state.charAt(0).toUpperCase() + state.slice(1);
+}
+
+function TaskRunPanel({
+  invariants,
+  taskRun,
+}: {
+  invariants: TaskInvariant[];
+  taskRun: TaskRun | null;
+}) {
+  const activeInvariants = invariants.filter(
+    (invariant) =>
+      invariant.enabled &&
+      (invariant.scope === "global" ||
+        taskRun?.invariantRefs.includes(invariant.id)),
+  );
+
+  if (!taskRun) {
+    return (
+      <section className="task-run-panel empty-task-run">
+        <div>
+          <span>Task run</span>
+          <strong>No active task</strong>
+        </div>
+        <p>Ready for an orchestrated task.</p>
+      </section>
+    );
+  }
+
+  const { context } = taskRun;
+  const lastSwarm = taskRun.swarmRuns[taskRun.swarmRuns.length - 1];
+
+  return (
+    <section className="task-run-panel">
+      <div className="task-run-head">
+        <div>
+          <span>Task run</span>
+          <strong>{taskStateTitle(context.state)}</strong>
+        </div>
+        <div className="task-run-step">
+          Step {context.step}/{context.total}
+        </div>
+      </div>
+      <div className="task-state-track" aria-label="Task lifecycle">
+        {(["planning", "execution", "validation", "done"] as TaskState[]).map(
+          (state) => (
+            <span
+              className={
+                state === context.state
+                  ? "active"
+                  : context.step > ["planning", "execution", "validation", "done"].indexOf(state) + 1
+                    ? "complete"
+                    : ""
+              }
+              key={state}
+            >
+              {taskStateTitle(state)}
+            </span>
+          ),
+        )}
+      </div>
+      <div className="task-run-grid">
+        <article>
+          <span>Current</span>
+          <p>{context.current || "- empty"}</p>
+        </article>
+        <article>
+          <span>Plan</span>
+          <p>{context.plan.length ? context.plan.join(" -> ") : "- empty"}</p>
+        </article>
+        <article>
+          <span>Done</span>
+          <p>{context.done.length ? context.done.join("; ") : "- empty"}</p>
+        </article>
+        <article>
+          <span>Invariants</span>
+          <p>{activeInvariants.length} active</p>
+        </article>
+        <article>
+          <span>Requirements</span>
+          <p>
+            {context.requirementsContract.openQuestions.length
+              ? `${context.requirementsContract.openQuestions.length} open question${
+                  context.requirementsContract.openQuestions.length === 1 ? "" : "s"
+                }`
+              : context.requirementsContract.readyForApproval
+                ? "Ready for approval"
+                : "- empty"}
+          </p>
+        </article>
+      </div>
+      <div className="task-run-grid">
+        <article>
+          <span>Swarm</span>
+          <p>
+            {lastSwarm
+              ? `${taskStateTitle(lastSwarm.stage)}: ${lastSwarm.agentIds.join(", ")}`
+              : "- empty"}
+          </p>
+        </article>
+        <article>
+          <span>Validation</span>
+          <p>
+            {taskRun.validationResult
+              ? `${taskRun.validationResult.passed ? "Passed" : "Failed"}: ${
+                  taskRun.validationResult.reason
+                }`
+              : "- empty"}
+          </p>
+        </article>
+      </div>
+      {context.pausedReason && (
+        <p className="task-pause">Paused: {context.pausedReason}</p>
+      )}
+      {context.awaitingPlanApproval && (
+        <p className="task-pause">Waiting for explicit plan approval.</p>
+      )}
+    </section>
+  );
+}
+
 function MemoryLayersView({
   activeDialog,
   events,
@@ -2331,6 +3006,9 @@ function MemoryLayersView({
   model,
   onCreate,
   onDelete,
+  onInvariantCreate,
+  onInvariantDelete,
+  onInvariantUpdate,
   onModelChange,
   onRename,
   onSelect,
@@ -2355,6 +3033,9 @@ function MemoryLayersView({
   model: string;
   onCreate: () => void;
   onDelete: (dialog: MemoryDialog) => void;
+  onInvariantCreate: (invariant: Partial<TaskInvariant>) => void;
+  onInvariantDelete: (invariantId: string) => void;
+  onInvariantUpdate: (invariant: Partial<TaskInvariant> & { id: string }) => void;
   onModelChange: (value: string) => void;
   onRename: (dialog: MemoryDialog) => void;
   onSelect: (dialogId: string) => void;
@@ -2461,6 +3142,10 @@ function MemoryLayersView({
         <div className="empty">Create a dialog to start using memory layers.</div>
       ) : (
         <>
+          <TaskRunPanel
+            invariants={lab.invariants}
+            taskRun={activeDialog.taskRun}
+          />
           <ConversationHistory messages={activeDialog.messages} />
           <div className="branch-summary">
             <span>Active topic: {activeBranch?.title ?? "Main topic"}</span>
@@ -2535,6 +3220,9 @@ function MemoryLayersView({
           lab={lab}
           loading={loading}
           onClose={() => setSettingsOpen(false)}
+          onInvariantCreate={onInvariantCreate}
+          onInvariantDelete={onInvariantDelete}
+          onInvariantUpdate={onInvariantUpdate}
           onMemoryFolderMove={onMemoryFolderMove}
           onProfileApplySuggestion={onProfileApplySuggestion}
           onProfileApplySuggestions={onProfileApplySuggestions}
