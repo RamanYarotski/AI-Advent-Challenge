@@ -62,6 +62,7 @@ export type TaskInvariant = {
   id: string;
   title: string;
   description: string;
+  dialogId: string | null;
   scope: TaskInvariantScope;
   appliesTo: TaskState[];
   severity: TaskInvariantSeverity;
@@ -129,15 +130,6 @@ export type SwarmRun = {
   createdAt: string;
 };
 
-export type StagePayload = {
-  id: string;
-  stage: TaskState;
-  agentId: string;
-  role: string;
-  messages: ChatMessage[];
-  createdAt: string;
-};
-
 export type TransitionDecision = {
   id: string;
   from: TaskState;
@@ -159,6 +151,7 @@ export type ValidationResult = {
 export type TaskRun = {
   context: TaskContext;
   invariantRefs: string[];
+  taskInvariants: TaskInvariant[];
   artifacts: StageArtifact[];
   agentRuns: AgentRun[];
   swarmRuns: SwarmRun[];
@@ -222,24 +215,6 @@ export type MemoryMetricTotals = {
   hasProviderCost: boolean;
 };
 
-export type RequestContextDebug = {
-  createdAt: string;
-  profile: UserProfile;
-  selectedBranchTitle: string;
-  selectedBranchSummary: string;
-  recentMessages: ChatMessage[];
-  workingMemory: MemoryLayerNote[];
-  longTermMemory: MemoryLayerNote[];
-  taskContext: TaskContext | null;
-  invariantRefs: string[];
-  stageAgentInputs: AgentRun[];
-  stagePayloads: StagePayload[];
-  swarmRuns: SwarmRun[];
-  transitionDecisions: TransitionDecision[];
-  validationResult: ValidationResult | null;
-  assembledMessages: ChatMessage[];
-};
-
 export type MemoryLayersState = {
   activeDialogId: string;
   dialogs: MemoryDialog[];
@@ -250,7 +225,6 @@ export type MemoryLayersState = {
   invariants: TaskInvariant[];
   pendingProfileUpdates: PendingProfileUpdate[];
   globalMetrics: MemoryMetricTotals;
-  lastRequestContext: RequestContextDebug | null;
   fileSettings: MemoryFileSettings;
   filePaths: MemoryFilePaths;
 };
@@ -264,7 +238,6 @@ type ShortTermFile = {
   dialogs?: unknown[];
   invariants?: unknown[];
   globalMetrics?: unknown;
-  lastRequestContext?: unknown;
   pendingProfileUpdates?: unknown[];
 };
 
@@ -297,113 +270,6 @@ const DEFAULT_FILE_SETTINGS: MemoryFileSettings = {
 };
 
 const TASK_STATES: TaskState[] = ["planning", "execution", "validation", "done"];
-
-const DEFAULT_INVARIANTS: TaskInvariant[] = [
-  {
-    id: "builtin-ui-english",
-    title: "Host assistant UI language",
-    description:
-      "All visible UI text in this AI Advent Challenge assistant must stay in English. This protects the host assistant UI and does not require arbitrary user-requested artifacts or the user's own message language to be English unless the task explicitly edits this app.",
-    scope: "global",
-    appliesTo: TASK_STATES,
-    severity: "blocker",
-    enabled: true,
-    source: "built-in",
-    createdAt: "built-in",
-    updatedAt: "built-in",
-  },
-  {
-    id: "builtin-unified-assistant",
-    title: "Unified assistant workflow",
-    description:
-      "Keep one unified assistant as the primary workflow; do not reintroduce day tabs as the main experience.",
-    scope: "global",
-    appliesTo: TASK_STATES,
-    severity: "blocker",
-    enabled: true,
-    source: "built-in",
-    createdAt: "built-in",
-    updatedAt: "built-in",
-  },
-  {
-    id: "builtin-automatic-context",
-    title: "Automatic context strategy",
-    description:
-      "The assistant selects topic branches and context strategy automatically; users should not have to choose context strategy manually.",
-    scope: "global",
-    appliesTo: TASK_STATES,
-    severity: "blocker",
-    enabled: true,
-    source: "built-in",
-    createdAt: "built-in",
-    updatedAt: "built-in",
-  },
-  {
-    id: "builtin-profile-boundaries",
-    title: "Profile boundaries",
-    description:
-      "Only the active user profile can define style, format, role/context, and constraints for the current answer.",
-    scope: "global",
-    appliesTo: TASK_STATES,
-    severity: "blocker",
-    enabled: true,
-    source: "built-in",
-    createdAt: "built-in",
-    updatedAt: "built-in",
-  },
-  {
-    id: "builtin-profile-suggestions",
-    title: "Confirmed profile updates",
-    description:
-      "Explicit profile preferences must go through suggested profile updates and must not be duplicated into long-term memory.",
-    scope: "global",
-    appliesTo: TASK_STATES,
-    severity: "blocker",
-    enabled: true,
-    source: "built-in",
-    createdAt: "built-in",
-    updatedAt: "built-in",
-  },
-  {
-    id: "builtin-profile-scoped-context",
-    title: "Profile-scoped branch context",
-    description:
-      "LLM prompts should use only the active profile's selected branch summary and recent selected-branch messages.",
-    scope: "global",
-    appliesTo: TASK_STATES,
-    severity: "blocker",
-    enabled: true,
-    source: "built-in",
-    createdAt: "built-in",
-    updatedAt: "built-in",
-  },
-  {
-    id: "builtin-validation-before-done",
-    title: "Validation before done",
-    description:
-      "A task must not move to Done until validation has passed.",
-    scope: "global",
-    appliesTo: TASK_STATES,
-    severity: "blocker",
-    enabled: true,
-    source: "built-in",
-    createdAt: "built-in",
-    updatedAt: "built-in",
-  },
-  {
-    id: "builtin-file-backed-memory",
-    title: "File-backed memory boundaries",
-    description:
-      "Keep short-term memory in JSON and working/long-term memory in separate editable Markdown files.",
-    scope: "global",
-    appliesTo: TASK_STATES,
-    severity: "warning",
-    enabled: true,
-    source: "built-in",
-    createdAt: "built-in",
-    updatedAt: "built-in",
-  },
-];
 
 function makeId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -702,6 +568,10 @@ function normalizeTaskInvariant(value: unknown): TaskInvariant | null {
     id: candidate.id,
     title: candidate.title.trim(),
     description: candidate.description.trim(),
+    dialogId:
+      typeof candidate.dialogId === "string" && candidate.dialogId.trim()
+        ? candidate.dialogId.trim()
+        : null,
     scope:
       candidate.scope === "task" || candidate.scope === "stage"
         ? candidate.scope
@@ -725,22 +595,12 @@ function normalizeTaskInvariant(value: unknown): TaskInvariant | null {
 }
 
 function normalizeInvariants(value: unknown): TaskInvariant[] {
-  const custom = Array.isArray(value)
+  return Array.isArray(value)
     ? value
         .map(normalizeTaskInvariant)
         .filter((invariant): invariant is TaskInvariant => invariant !== null)
-        .filter((invariant) => invariant.source !== "built-in")
+        .filter((invariant) => invariant.source === "user")
     : [];
-  const byId = new Map<string, TaskInvariant>();
-
-  for (const invariant of DEFAULT_INVARIANTS) {
-    byId.set(invariant.id, invariant);
-  }
-  for (const invariant of custom) {
-    byId.set(invariant.id, invariant);
-  }
-
-  return Array.from(byId.values());
 }
 
 function normalizeInvariantsFile(value: unknown): TaskInvariant[] {
@@ -957,35 +817,6 @@ function normalizeSwarmRun(value: unknown): SwarmRun | null {
   };
 }
 
-function normalizeStagePayload(value: unknown): StagePayload | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-
-  const candidate = value as Partial<StagePayload>;
-  if (
-    typeof candidate.id !== "string" ||
-    typeof candidate.agentId !== "string" ||
-    typeof candidate.role !== "string"
-  ) {
-    return null;
-  }
-
-  return {
-    id: candidate.id,
-    stage: normalizeTaskState(candidate.stage),
-    agentId: candidate.agentId,
-    role: candidate.role,
-    messages: Array.isArray(candidate.messages)
-      ? candidate.messages.filter(isChatMessage)
-      : [],
-    createdAt:
-      typeof candidate.createdAt === "string" && candidate.createdAt
-        ? candidate.createdAt
-        : nowIso(),
-  };
-}
-
 function normalizeTransitionDecision(value: unknown): TransitionDecision | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -1052,6 +883,17 @@ function normalizeTaskRun(value: unknown): TaskRun | null {
   if (!context) {
     return null;
   }
+  const taskInvariants = Array.isArray(candidate.taskInvariants)
+    ? candidate.taskInvariants
+        .map(normalizeTaskInvariant)
+        .filter((invariant): invariant is TaskInvariant => invariant !== null)
+        .filter((invariant) => invariant.source === "task")
+    : Array.isArray(candidate.invariants)
+      ? candidate.invariants
+          .map(normalizeTaskInvariant)
+          .filter((invariant): invariant is TaskInvariant => invariant !== null)
+          .filter((invariant) => invariant.source === "task")
+      : [];
 
   return {
     context,
@@ -1060,11 +902,9 @@ function normalizeTaskRun(value: unknown): TaskRun | null {
           (item): item is string => typeof item === "string",
         )
       : Array.isArray(candidate.invariants)
-        ? candidate.invariants
-            .map(normalizeTaskInvariant)
-            .filter((invariant): invariant is TaskInvariant => invariant !== null)
-            .map((invariant) => invariant.id)
+        ? taskInvariants.map((invariant) => invariant.id)
         : [],
+    taskInvariants,
     artifacts: Array.isArray(candidate.artifacts)
       ? candidate.artifacts
           .map(normalizeStageArtifact)
@@ -1090,80 +930,6 @@ function normalizeTaskRun(value: unknown): TaskRun | null {
       typeof candidate.updatedAt === "string" && candidate.updatedAt
         ? candidate.updatedAt
         : nowIso(),
-  };
-}
-
-function normalizeRequestContextDebug(value: unknown): RequestContextDebug | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-
-  const candidate = value as Partial<RequestContextDebug> & {
-    invariants?: unknown[];
-  };
-  const profile = normalizeProfile(candidate.profile, 1);
-  if (!profile) {
-    return null;
-  }
-
-  return {
-    createdAt:
-      typeof candidate.createdAt === "string" && candidate.createdAt
-        ? candidate.createdAt
-        : nowIso(),
-    profile,
-    selectedBranchTitle:
-      typeof candidate.selectedBranchTitle === "string"
-        ? candidate.selectedBranchTitle
-        : "",
-    selectedBranchSummary:
-      typeof candidate.selectedBranchSummary === "string"
-        ? candidate.selectedBranchSummary
-        : "",
-    recentMessages: Array.isArray(candidate.recentMessages)
-      ? candidate.recentMessages.filter(isChatMessage)
-      : [],
-    workingMemory: Array.isArray(candidate.workingMemory)
-      ? candidate.workingMemory.filter(isMemoryLayerNote)
-      : [],
-    longTermMemory: Array.isArray(candidate.longTermMemory)
-      ? candidate.longTermMemory.filter(isMemoryLayerNote)
-      : [],
-    taskContext: normalizeTaskContext(candidate.taskContext),
-    invariantRefs: Array.isArray(candidate.invariantRefs)
-      ? candidate.invariantRefs.filter(
-          (item): item is string => typeof item === "string",
-        )
-      : Array.isArray(candidate.invariants)
-        ? candidate.invariants
-            .map(normalizeTaskInvariant)
-            .filter((invariant): invariant is TaskInvariant => invariant !== null)
-            .map((invariant) => invariant.id)
-        : [],
-    stageAgentInputs: Array.isArray(candidate.stageAgentInputs)
-      ? candidate.stageAgentInputs
-          .map(normalizeAgentRun)
-          .filter((run): run is AgentRun => run !== null)
-      : [],
-    stagePayloads: Array.isArray(candidate.stagePayloads)
-      ? candidate.stagePayloads
-          .map(normalizeStagePayload)
-          .filter((payload): payload is StagePayload => payload !== null)
-      : [],
-    swarmRuns: Array.isArray(candidate.swarmRuns)
-      ? candidate.swarmRuns
-          .map(normalizeSwarmRun)
-          .filter((run): run is SwarmRun => run !== null)
-      : [],
-    transitionDecisions: Array.isArray(candidate.transitionDecisions)
-      ? candidate.transitionDecisions
-          .map(normalizeTransitionDecision)
-          .filter((decision): decision is TransitionDecision => decision !== null)
-      : [],
-    validationResult: normalizeValidationResult(candidate.validationResult),
-    assembledMessages: Array.isArray(candidate.assembledMessages)
-      ? candidate.assembledMessages.filter(isChatMessage)
-      : [],
   };
 }
 
@@ -1328,28 +1094,6 @@ function normalizeDialogs(value: unknown): MemoryDialog[] {
     : [];
 }
 
-function legacyTaskRunInvariants(value: unknown): TaskInvariant[] {
-  const parsed = value as Partial<ShortTermFile>;
-  if (!Array.isArray(parsed.dialogs)) {
-    return [];
-  }
-
-  return parsed.dialogs
-    .flatMap((dialog) => {
-      if (!dialog || typeof dialog !== "object") {
-        return [];
-      }
-      const taskRun = (dialog as Record<string, unknown>).taskRun;
-      if (!taskRun || typeof taskRun !== "object") {
-        return [];
-      }
-      const invariants = (taskRun as Record<string, unknown>).invariants;
-      return Array.isArray(invariants) ? invariants : [];
-    })
-    .map(normalizeTaskInvariant)
-    .filter((invariant): invariant is TaskInvariant => invariant !== null);
-}
-
 async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
   try {
     const raw = await readFile(filePath, "utf8");
@@ -1451,16 +1195,10 @@ export async function readMemoryLayersState(): Promise<MemoryLayersState> {
   const dialogs = normalizeDialogs(shortTerm);
   const profiles = normalizeProfiles(profileFile);
   const globalMetrics = normalizeMetricTotals(shortTerm.globalMetrics);
-  const lastRequestContext = normalizeRequestContextDebug(shortTerm.lastRequestContext);
   const storedInvariants =
     invariantsFile === null
       ? normalizeInvariants(shortTerm.invariants)
       : normalizeInvariantsFile(invariantsFile);
-  const invariantMap = new Map<string, TaskInvariant>();
-  for (const invariant of [...storedInvariants, ...legacyTaskRunInvariants(shortTerm)]) {
-    invariantMap.set(invariant.id, invariant);
-  }
-  const invariants = Array.from(invariantMap.values());
   const pendingProfileUpdates = Array.isArray(shortTerm.pendingProfileUpdates)
     ? shortTerm.pendingProfileUpdates
         .map(normalizePendingProfileUpdate)
@@ -1470,6 +1208,18 @@ export async function readMemoryLayersState(): Promise<MemoryLayersState> {
   const activeDialogId =
     safeDialogs.find((dialog) => dialog.id === index.activeDialogId)?.id ??
     safeDialogs[0].id;
+  const dialogIds = new Set(safeDialogs.map((dialog) => dialog.id));
+  const scopedInvariants = storedInvariants
+    .map((invariant) =>
+      invariant.source === "user" && !invariant.dialogId
+        ? { ...invariant, dialogId: activeDialogId }
+        : invariant,
+    )
+    .filter(
+      (invariant) =>
+        invariant.source !== "user" ||
+        (invariant.dialogId !== null && dialogIds.has(invariant.dialogId)),
+    );
   const workingMarkdown = await readTextFile(filePaths.working);
   const longTermMarkdown = await readTextFile(filePaths.longTerm);
 
@@ -1480,10 +1230,9 @@ export async function readMemoryLayersState(): Promise<MemoryLayersState> {
     longTermMemory: parseMarkdownNotes(longTermMarkdown, fileSettings.longTermMemoryFileName),
     activeProfileId: profiles.activeProfileId,
     userProfiles: profiles.userProfiles,
-    invariants,
+    invariants: scopedInvariants,
     pendingProfileUpdates,
     globalMetrics,
-    lastRequestContext,
     fileSettings,
     filePaths,
   };
@@ -1510,7 +1259,6 @@ export async function writeMemoryLayersState(state: MemoryLayersState) {
       {
         dialogs: state.dialogs,
         globalMetrics: state.globalMetrics,
-        lastRequestContext: state.lastRequestContext,
         pendingProfileUpdates: state.pendingProfileUpdates,
       },
       null,
@@ -1921,6 +1669,7 @@ export function createTaskInvariant(
     id: makeId("task-invariant"),
     title,
     description,
+    dialogId: state.activeDialogId,
     scope:
       invariant.scope === "task" || invariant.scope === "stage"
         ? invariant.scope
@@ -1946,7 +1695,7 @@ export function updateTaskInvariant(
   return {
     ...state,
     invariants: state.invariants.map((item) => {
-      if (item.id !== invariant.id || item.source === "built-in") {
+      if (item.id !== invariant.id || item.source !== "user") {
         return item;
       }
 
@@ -1984,10 +1733,20 @@ export function deleteTaskInvariant(
   return {
     ...state,
     invariants: state.invariants.filter(
-      (invariant) =>
-        invariant.id !== invariantId || invariant.source === "built-in",
+      (invariant) => invariant.id !== invariantId || invariant.source !== "user",
     ),
   };
+}
+
+export function getDialogInvariants(
+  state: Pick<MemoryLayersState, "activeDialogId" | "invariants">,
+  dialogId = state.activeDialogId,
+) {
+  return state.invariants.filter(
+    (invariant) =>
+      invariant.source === "user" &&
+      invariant.dialogId === dialogId,
+  );
 }
 
 export function addGlobalMetricRow(
@@ -2035,6 +1794,10 @@ export function deleteMemoryDialog(
     ...state,
     activeDialogId,
     dialogs,
+    invariants: state.invariants.filter(
+      (invariant) =>
+        invariant.source !== "user" || invariant.dialogId !== dialogId,
+    ),
   };
 }
 

@@ -51,18 +51,19 @@ Their separate findings are aggregated by the orchestrator into one plan, one se
 
 ## Invariants
 
-Global invariants are stored in `task-invariants.json`, separately from the dialog, user profile, and Markdown memory files. Built-in invariants protect the host assistant and its orchestration architecture, while user invariants can be added from Settings for task-specific or project-specific rules.
+User-managed invariants are stored in `task-invariants.json`, separately from the dialog, user profile, and Markdown memory files. Each user invariant is owned by the active dialog, appears only while that dialog is active, and is deleted when the dialog is deleted. Internal architecture rules protect the host assistant and lifecycle in code, but they are not shown in Settings and are not saved as user invariants.
 
 Examples:
 
-- This assistant's own host UI text stays in English.
-- The assistant remains one unified workflow.
-- Context strategy stays automatic.
-- Profile preferences stay in confirmed profile suggestions.
-- A task cannot be marked done before validation passes.
+- Use only free APIs for this task.
+- Do not suggest Java for this project.
+- Keep the generated artifact compatible with a browser runtime.
+- Limit dependencies to a small, reviewable set.
 
-Validation receives the full active invariant set. A blocker violation keeps the task out of Done and returns it to Execution or asks for user input.
+Each lifecycle stage receives active user invariants plus task-local invariants generated for the current task run. The orchestrator checks each stage artifact with an internal semantic invariant gate after the stage agent responds. The gate judges the artifact against invariant meaning instead of keyword, regex, or technology-specific rules, and blocker invariants fail closed if the gate cannot verify the artifact.
+
+Planning cannot offer an approval-ready plan that violates blockers, Approval re-checks the saved plan before `Planning -> Execution`, Execution cannot send a conflicting draft to Validation, Validation cannot pass a conflicting draft, and Done cannot finalize a conflicting answer. Task-local invariants stay with the task run instead of becoming global Settings rules.
 
 ## Debugging
 
-Settings -> Request context shows the assembled context plus task state, active invariants, stage-agent runs, swarm output, transition decisions, and validation result.
+The main task run panel shows the active lifecycle state, plan, requirements status, active invariant count, swarm activity, and validation result.

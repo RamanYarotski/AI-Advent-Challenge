@@ -37,7 +37,7 @@ The assistant can also suggest profile updates from explicit user preferences in
 
 When the extractor finds profile suggestions for the current user message, the main assistant call is told not to duplicate those unconfirmed preferences into working or long-term memory. This keeps personalization preferences in the profile confirmation flow and leaves long-term memory for reusable facts and durable global rules.
 
-Prompt assembly is profile-scoped. New chat messages are tagged with the active `profileId`, and the LLM receives only the active profile's recent branch messages and branch summary. The active profile is authoritative for questions about style, format, role/context, and constraints. Legacy profile-like notes in working or long-term memory are filtered out of the request context so they cannot override the selected profile.
+Prompt assembly is profile-scoped. New chat messages are tagged with the active `profileId`, and the LLM receives only the active profile's recent branch messages and branch summary. The active profile is authoritative for questions about style, format, role/context, and constraints. Legacy profile-like notes in working or long-term memory are filtered before prompt assembly so they cannot override the selected profile.
 
 ## Settings Window
 
@@ -48,7 +48,7 @@ The main assistant screen stays focused on chat. A settings button opens a dedic
 - Memory location: move known memory files to another server-visible folder and review fixed file paths.
 - Saved memory: inspect working and long-term memory.
 - Metrics: review global totals for the active memory store, including deleted dialogs.
-- Request context: inspect the full context assembled for the last assistant request.
+- Metrics: inspect global memory-store totals.
 
 Memory file names are fixed to keep the storage layout predictable:
 
@@ -59,7 +59,7 @@ Memory file names are fixed to keep the storage layout predictable:
 
 ## Trace
 
-The memory routing trace shows which profile was applied, which layers were injected, and how many recent selected-branch messages were included. The Request context settings page shows the full assembled messages, active profile, branch summary, recent branch messages, working memory, and long-term memory.
+The memory routing trace shows which profile was applied, which layers were injected, and how many recent selected-branch messages were included.
 
 ## Test Scenarios
 
@@ -78,5 +78,5 @@ The memory routing trace shows which profile was applied, which layers were inje
 - Move the memory folder and confirm known memory files are moved, not copied.
 - Open Saved memory and confirm only working and long-term memory are shown there.
 - Open Metrics and confirm global totals are shown for each tracked metric.
-- Open Request context and confirm profile plus memory layers are visible.
+- Open Metrics and confirm global memory-store totals are visible.
 - Run `npm run lint` and `npm run build`.

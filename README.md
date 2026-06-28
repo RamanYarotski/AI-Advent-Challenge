@@ -6,7 +6,7 @@ The project started as small isolated LLM experiments and is now evolving into o
 
 ## Current Stage
 
-The current build is a unified assistant with automatic topic branches, context compression, global metrics, file-backed memory, manageable user profiles, language-agnostic profile-learning suggestions, and lifecycle-only orchestration. Every user turn now runs through a persisted `Planning -> Execution -> Validation -> Done` state machine, with a planning swarm, a structured requirements contract, explicit plan approval before execution, stage-local agent contracts, scoped invariants, validation gates, transition logs, and request-context inspection.
+The current build is a unified assistant with automatic topic branches, context compression, global metrics, file-backed memory, manageable user profiles, language-agnostic profile-learning suggestions, and lifecycle-only orchestration. Every user turn now runs through a persisted `Planning -> Execution -> Validation -> Done` state machine, with a planning swarm, a structured requirements contract, explicit plan approval before execution, stage-local agent contracts, dialog-scoped user invariants, semantic invariant gates, and transition logs.
 
 ## Progress
 
@@ -21,8 +21,8 @@ The current build is a unified assistant with automatic topic branches, context 
 - Day 9: added context compression, where older messages are summarized and recent messages stay live in the prompt.
 - Day 10: explored context strategies under the hood, including sliding windows, sticky facts, and branch-based topic separation.
 - Day 11: merged compression, branching, and memory layers into the main assistant with editable JSON/Markdown-backed memory files.
-- Day 12: added full user profile management, language-agnostic confirmed profile update suggestions, profile-scoped prompt context, memory folder moves, global metrics, and request-context inspection so personalization and memory injection are visible and testable.
-- Day 13-15: combined the task-state, invariant, swarm, and transition-control assignments into one unified assistant upgrade: an internal lifecycle-only task orchestrator routes every user turn through stage-local agents, runs a planning swarm, injects active invariants, validates before completion, and stores task state in the file-backed memory model.
+- Day 12: added full user profile management, language-agnostic confirmed profile update suggestions, profile-scoped prompt context, memory folder moves, and global metrics so personalization and memory behavior are visible and testable.
+- Day 13-15: combined the task-state, invariant, swarm, and transition-control assignments into one unified assistant upgrade: an internal lifecycle-only task orchestrator routes every user turn through stage-local agents, runs a planning swarm, injects active-dialog and task-local invariants, checks stage artifacts through semantic gates instead of keyword rules, validates before completion, and stores task state in the file-backed memory model.
 
 ## Architecture Notes
 

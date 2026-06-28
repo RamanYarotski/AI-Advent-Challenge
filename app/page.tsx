@@ -136,6 +136,7 @@ type TaskInvariant = {
   id: string;
   title: string;
   description: string;
+  dialogId: string | null;
   scope: "global" | "task" | "stage";
   appliesTo: TaskState[];
   severity: "blocker" | "warning";
@@ -203,15 +204,6 @@ type SwarmRun = {
   createdAt: string;
 };
 
-type StagePayload = {
-  id: string;
-  stage: TaskState;
-  agentId: string;
-  role: string;
-  messages: ChatMessage[];
-  createdAt: string;
-};
-
 type TransitionDecision = {
   id: string;
   from: TaskState;
@@ -233,6 +225,7 @@ type ValidationResult = {
 type TaskRun = {
   context: TaskContext;
   invariantRefs: string[];
+  taskInvariants: TaskInvariant[];
   artifacts: StageArtifact[];
   agentRuns: AgentRun[];
   swarmRuns: SwarmRun[];
@@ -275,24 +268,6 @@ type MemoryMetricTotals = {
   hasProviderCost: boolean;
 };
 
-type RequestContextDebug = {
-  createdAt: string;
-  profile: UserProfile;
-  selectedBranchTitle: string;
-  selectedBranchSummary: string;
-  recentMessages: ChatMessage[];
-  workingMemory: MemoryLayerNote[];
-  longTermMemory: MemoryLayerNote[];
-  taskContext: TaskContext | null;
-  invariantRefs: string[];
-  stageAgentInputs: AgentRun[];
-  stagePayloads: StagePayload[];
-  swarmRuns: SwarmRun[];
-  transitionDecisions: TransitionDecision[];
-  validationResult: ValidationResult | null;
-  assembledMessages: ChatMessage[];
-};
-
 type MemoryBranch = {
   id: string;
   title: string;
@@ -320,7 +295,6 @@ type MemoryLayersState = {
   invariants: TaskInvariant[];
   pendingProfileUpdates: PendingProfileUpdate[];
   globalMetrics: MemoryMetricTotals;
-  lastRequestContext: RequestContextDebug | null;
   fileSettings: MemoryFileSettings;
   filePaths: MemoryFilePaths;
 };
@@ -1949,8 +1923,7 @@ type SettingsSection =
   | "invariants"
   | "location"
   | "memory"
-  | "metrics"
-  | "context";
+  | "metrics";
 
 function activeProfileFrom(lab: MemoryLayersState) {
   return (
@@ -2002,7 +1975,6 @@ function AssistantSettingsModal({
     { id: "location", label: "Memory location" },
     { id: "memory", label: "Saved memory" },
     { id: "metrics", label: "Metrics" },
-    { id: "context", label: "Request context" },
   ];
 
   return (
@@ -2069,7 +2041,11 @@ function AssistantSettingsModal({
           )}
           {section === "invariants" && (
             <InvariantsSettingsPage
-              invariants={lab.invariants}
+              invariants={lab.invariants.filter(
+                (invariant) =>
+                  invariant.source === "user" &&
+                  invariant.dialogId === lab.activeDialogId,
+              )}
               loading={loading}
               onCreate={onInvariantCreate}
               onDelete={onInvariantDelete}
@@ -2081,12 +2057,6 @@ function AssistantSettingsModal({
           )}
           {section === "metrics" && (
             <MetricsSettingsPage totals={lab.globalMetrics} />
-          )}
-          {section === "context" && (
-            <RequestContextSettingsPage
-              context={lab.lastRequestContext}
-              invariants={lab.invariants}
-            />
           )}
         </div>
       </section>
@@ -2123,7 +2093,25 @@ function ProfileSettingsPage({
   pendingProfileUpdates: PendingProfileUpdate[];
   profiles: UserProfile[];
 }) {
-  const [draft, setDraft] = useState<UserProfile | undefined>(activeProfile);
+  const [draftState, setDraftState] = useState<{
+    profile: UserProfile;
+    profileId: string;
+    updatedAt: string;
+  } | null>(
+    activeProfile
+      ? {
+          profile: activeProfile,
+          profileId: activeProfile.id,
+          updatedAt: activeProfile.updatedAt,
+        }
+      : null,
+  );
+  const draft =
+    activeProfile &&
+    draftState?.profileId === activeProfile.id &&
+    draftState.updatedAt === activeProfile.updatedAt
+      ? draftState.profile
+      : activeProfile;
 
   if (!draft) {
     return <div className="empty">No profiles are available.</div>;
@@ -2137,7 +2125,22 @@ function ProfileSettingsPage({
     key: K,
     value: UserProfile[K],
   ) {
-    setDraft((current) => (current ? { ...current, [key]: value } : current));
+    setDraftState((current) => {
+      const base =
+        activeProfile &&
+        current?.profileId === activeProfile.id &&
+        current.updatedAt === activeProfile.updatedAt
+          ? current.profile
+          : activeProfile;
+
+      return base
+        ? {
+            profile: { ...base, [key]: value },
+            profileId: base.id,
+            updatedAt: base.updatedAt,
+          }
+        : current;
+    });
   }
 
   function createProfile() {
@@ -2354,6 +2357,9 @@ function InvariantsSettingsPage({
     "validation",
     "done",
   ]);
+  const visibleInvariants = invariants.filter(
+    (invariant) => invariant.source === "user",
+  );
 
   function toggleStage(stage: TaskState) {
     setAppliesTo((current) =>
@@ -2404,7 +2410,7 @@ function InvariantsSettingsPage({
     <section className="settings-page invariants-settings">
       <div className="settings-page-head">
         <h3>Invariants</h3>
-        <p>Rules injected into task stage agents and validation.</p>
+        <p>Rules for the active dialog. They are removed with the dialog.</p>
       </div>
       <form className="invariant-form" onSubmit={submitInvariant}>
         <label>
@@ -2471,7 +2477,9 @@ function InvariantsSettingsPage({
         </button>
       </form>
       <div className="invariant-list">
-        {invariants.map((invariant) => (
+        {visibleInvariants.length === 0 ? (
+          <div className="memory-empty">No user invariants yet.</div>
+        ) : visibleInvariants.map((invariant) => (
           <article className="invariant-card" key={invariant.id}>
             <div>
               <span>
@@ -2484,39 +2492,35 @@ function InvariantsSettingsPage({
               {invariant.scope} / {invariant.appliesTo.map(taskStateTitle).join(", ")}
             </small>
             <div className="settings-actions">
-              {invariant.source !== "built-in" && (
-                <>
-                  <button
-                    className="secondary-action"
-                    disabled={loading}
-                    onClick={() =>
-                      onUpdate({
-                        id: invariant.id,
-                        enabled: !invariant.enabled,
-                      })
-                    }
-                    type="button"
-                  >
-                    {invariant.enabled ? "Disable" : "Enable"}
-                  </button>
-                  <button
-                    className="secondary-action"
-                    disabled={loading}
-                    onClick={() => editInvariant(invariant)}
-                    type="button"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    className="danger-action"
-                    disabled={loading}
-                    onClick={() => onDelete(invariant.id)}
-                    type="button"
-                  >
-                    Delete
-                  </button>
-                </>
-              )}
+              <button
+                className="secondary-action"
+                disabled={loading}
+                onClick={() =>
+                  onUpdate({
+                    id: invariant.id,
+                    enabled: !invariant.enabled,
+                  })
+                }
+                type="button"
+              >
+                {invariant.enabled ? "Disable" : "Enable"}
+              </button>
+              <button
+                className="secondary-action"
+                disabled={loading}
+                onClick={() => editInvariant(invariant)}
+                type="button"
+              >
+                Edit
+              </button>
+              <button
+                className="danger-action"
+                disabled={loading}
+                onClick={() => onDelete(invariant.id)}
+                type="button"
+              >
+                Delete
+              </button>
             </div>
           </article>
         ))}
@@ -2603,279 +2607,6 @@ function MetricsSettingsPage({
   );
 }
 
-function RequestContextSettingsPage({
-  context,
-  invariants,
-}: {
-  context: RequestContextDebug | null;
-  invariants: TaskInvariant[];
-}) {
-  if (!context) {
-    return (
-      <section className="settings-page">
-        <div className="settings-page-head">
-          <h3>Request context</h3>
-          <p>Send a message to inspect the exact context payload assembled for the model.</p>
-        </div>
-        <div className="empty">No request context has been captured yet.</div>
-      </section>
-    );
-  }
-
-  return (
-    <section className="settings-page request-context-page">
-      <div className="settings-page-head">
-        <h3>Request context</h3>
-        <p>
-          Payload/context sent to the LLM. Captured at{" "}
-          {new Date(context.createdAt).toLocaleString("en-US")}.
-        </p>
-      </div>
-      <RequestContextBlock
-        title="Active profile"
-        value={[
-          `Name: ${context.profile.name}`,
-          `Role/context: ${context.profile.roleContext || "- empty"}`,
-          `Style: ${context.profile.style || "- empty"}`,
-          `Format: ${context.profile.format || "- empty"}`,
-          `Constraints: ${context.profile.constraints || "- empty"}`,
-        ].join("\n")}
-      />
-      <RequestContextBlock
-        title="Selected branch summary"
-        value={[
-          `Branch: ${context.selectedBranchTitle}`,
-          context.selectedBranchSummary || "- empty",
-        ].join("\n")}
-      />
-      <RequestContextBlock
-        title="Recent selected-branch messages"
-        value={formatDebugMessages(context.recentMessages)}
-      />
-      <RequestContextBlock
-        title="Working memory"
-        value={formatDebugNotes(context.workingMemory)}
-      />
-      <RequestContextBlock
-        title="Long-term memory"
-        value={formatDebugNotes(context.longTermMemory)}
-      />
-      <RequestContextBlock
-        title="Task context"
-        value={formatDebugTaskContext(context.taskContext)}
-      />
-      <RequestContextBlock
-        title="Active invariants"
-        value={formatDebugInvariantRefs(context.invariantRefs, invariants)}
-      />
-      <RequestContextBlock
-        title="Stage agent runs"
-        value={formatDebugAgentRuns(context.stageAgentInputs)}
-      />
-      <RequestContextBlock
-        title="Stage payload messages"
-        value={formatDebugStagePayloads(context.stagePayloads)}
-      />
-      <RequestContextBlock
-        title="Swarm runs"
-        value={formatDebugSwarmRuns(context.swarmRuns)}
-      />
-      <RequestContextBlock
-        title="Transition decisions"
-        value={formatDebugTransitions(context.transitionDecisions)}
-      />
-      <RequestContextBlock
-        title="Validation result"
-        value={formatDebugValidation(context.validationResult)}
-      />
-      <RequestContextBlock
-        title="Full assembled messages"
-        value={formatDebugMessages(context.assembledMessages)}
-      />
-    </section>
-  );
-}
-
-function RequestContextBlock({
-  title,
-  value,
-}: {
-  title: string;
-  value: string;
-}) {
-  return (
-    <article className="request-context-block">
-      <h4>{title}</h4>
-      <pre>{value || "- empty"}</pre>
-    </article>
-  );
-}
-
-function formatDebugMessages(messages: ChatMessage[]) {
-  if (!messages.length) {
-    return "- empty";
-  }
-
-  return messages
-    .map((message, index) => `${index + 1}. ${message.role}\n${message.content}`)
-    .join("\n\n");
-}
-
-function formatDebugNotes(notes: MemoryLayerNote[]) {
-  if (!notes.length) {
-    return "- empty";
-  }
-
-  return notes.map((note) => `- ${note.text}`).join("\n");
-}
-
-function formatDebugTaskContext(context: TaskContext | null) {
-  if (!context) {
-    return "- empty";
-  }
-
-  const contract = context.requirementsContract;
-  return [
-    `Task: ${context.task}`,
-    `State: ${context.state}`,
-    `Step: ${context.step}/${context.total}`,
-    `Current: ${context.current || "- empty"}`,
-    `Plan: ${context.plan.length ? context.plan.join(" -> ") : "- empty"}`,
-    `Done: ${context.done.length ? context.done.join("; ") : "- empty"}`,
-    `Paused: ${context.pausedReason || "- none"}`,
-    `Awaiting plan approval: ${context.awaitingPlanApproval ? "yes" : "no"}`,
-    "",
-    "Requirements contract:",
-    `Goal: ${contract?.goal || "- empty"}`,
-    `Target/location: ${contract?.targetLocation || "- empty"}`,
-    `Requirements: ${
-      contract?.requirements.length ? contract.requirements.join("; ") : "- empty"
-    }`,
-    `Constraints: ${
-      contract?.constraints.length ? contract.constraints.join("; ") : "- empty"
-    }`,
-    `Assumptions: ${
-      contract?.assumptions.length ? contract.assumptions.join("; ") : "- empty"
-    }`,
-    `Acceptance criteria: ${
-      contract?.acceptanceCriteria.length
-        ? contract.acceptanceCriteria.join("; ")
-        : "- empty"
-    }`,
-    `Open questions: ${
-      contract?.openQuestions.length
-        ? contract.openQuestions.join("; ")
-        : "- empty"
-    }`,
-    `Ready for approval: ${contract?.readyForApproval ? "yes" : "no"}`,
-  ].join("\n");
-}
-
-function formatDebugInvariants(invariants: TaskInvariant[]) {
-  if (!invariants.length) {
-    return "- empty";
-  }
-
-  return invariants
-    .map(
-      (invariant) =>
-        `- [${invariant.enabled ? "on" : "off"}] ${invariant.title} (${invariant.severity}, ${invariant.source})\n  ${invariant.description}`,
-    )
-    .join("\n");
-}
-
-function formatDebugInvariantRefs(refs: string[], invariants: TaskInvariant[]) {
-  if (!refs.length) {
-    return "- empty";
-  }
-
-  const byId = new Map(invariants.map((invariant) => [invariant.id, invariant]));
-  return refs
-    .map((ref) => byId.get(ref))
-    .map((invariant, index) =>
-      invariant
-        ? `- [${invariant.enabled ? "on" : "off"}] ${invariant.title} (${invariant.severity}, ${invariant.source})\n  ${invariant.description}`
-        : `- ${refs[index]}`,
-    )
-    .join("\n");
-}
-
-function formatDebugAgentRuns(runs: AgentRun[]) {
-  if (!runs.length) {
-    return "- empty";
-  }
-
-  return runs
-    .map(
-      (run, index) =>
-        `${index + 1}. ${run.role} (${run.agentId})\nStage: ${run.stage}\nFindings: ${
-          run.findings.length ? run.findings.join("; ") : "- empty"
-        }\nOutput:\n${run.output}`,
-    )
-    .join("\n\n");
-}
-
-function formatDebugStagePayloads(payloads: StagePayload[]) {
-  if (!payloads.length) {
-    return "- empty";
-  }
-
-  return payloads
-    .map(
-      (payload, index) =>
-        [
-          `${index + 1}. ${payload.role} (${payload.agentId})`,
-          `Stage: ${payload.stage}`,
-          formatDebugMessages(payload.messages),
-        ].join("\n"),
-    )
-    .join("\n\n");
-}
-
-function formatDebugSwarmRuns(runs: SwarmRun[]) {
-  if (!runs.length) {
-    return "- empty";
-  }
-
-  return runs
-    .map(
-      (run, index) =>
-        `${index + 1}. ${run.stage}\nAgents: ${run.agentIds.join(", ")}\n${run.aggregatedDecision}`,
-    )
-    .join("\n\n");
-}
-
-function formatDebugTransitions(transitions: TransitionDecision[]) {
-  if (!transitions.length) {
-    return "- empty";
-  }
-
-  return transitions
-    .map(
-      (transition) =>
-        `- ${transition.from} -> ${transition.to}: ${
-          transition.allowed ? "allowed" : "blocked"
-        }\n  ${transition.reason}`,
-    )
-    .join("\n");
-}
-
-function formatDebugValidation(result: ValidationResult | null) {
-  if (!result) {
-    return "- empty";
-  }
-
-  return [
-    `Status: ${result.passed ? "passed" : "failed"}`,
-    `Reason: ${result.reason}`,
-    `Failed invariants: ${
-      result.failedInvariants.length ? result.failedInvariants.join(", ") : "none"
-    }`,
-    `Retry: ${result.retryInstruction || "- none"}`,
-    `Reviewers: ${result.reviewerCount}`,
-  ].join("\n");
-}
-
 function taskStateTitle(state: TaskState) {
   return state.charAt(0).toUpperCase() + state.slice(1);
 }
@@ -2887,13 +2618,6 @@ function TaskRunPanel({
   invariants: TaskInvariant[];
   taskRun: TaskRun | null;
 }) {
-  const activeInvariants = invariants.filter(
-    (invariant) =>
-      invariant.enabled &&
-      (invariant.scope === "global" ||
-        taskRun?.invariantRefs.includes(invariant.id)),
-  );
-
   if (!taskRun) {
     return (
       <section className="task-run-panel empty-task-run">
@@ -2907,6 +2631,12 @@ function TaskRunPanel({
   }
 
   const { context } = taskRun;
+  const activeInvariants = [...invariants, ...taskRun.taskInvariants].filter(
+    (invariant) =>
+      invariant.enabled &&
+      (invariant.appliesTo.includes(context.state) ||
+        invariant.appliesTo.length === 0),
+  );
   const lastSwarm = taskRun.swarmRuns[taskRun.swarmRuns.length - 1];
 
   return (
@@ -3072,6 +2802,11 @@ function MemoryLayersView({
     100,
     Math.round((usedContextTokens / contextLimit) * 1000) / 10,
   );
+  const activeDialogInvariants = lab.invariants.filter(
+    (invariant) =>
+      invariant.source === "user" &&
+      invariant.dialogId === lab.activeDialogId,
+  );
   return (
     <section className="token-lab memory-lab">
       <div className="assistant-toolbar">
@@ -3143,7 +2878,7 @@ function MemoryLayersView({
       ) : (
         <>
           <TaskRunPanel
-            invariants={lab.invariants}
+            invariants={activeDialogInvariants}
             taskRun={activeDialog.taskRun}
           />
           <ConversationHistory messages={activeDialog.messages} />

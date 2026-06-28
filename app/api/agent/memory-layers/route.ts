@@ -16,6 +16,7 @@ import {
   getActiveMemoryBranch,
   getActiveMemoryDialog,
   getActiveUserProfile,
+  getDialogInvariants,
   makeMemoryLayerId,
   moveMemoryFolder,
   type AgentRun,
@@ -25,10 +26,8 @@ import {
   type MemoryLayerEvent,
   type MemoryLayerKey,
   type MemoryLayerNote,
-  type RequestContextDebug,
   type RequirementsContract,
   type StageArtifact,
-  type StagePayload,
   type SwarmRun,
   type TaskContext,
   type TaskInvariant,
@@ -148,14 +147,27 @@ type ValidationAgentResult = {
   confidence: number;
 };
 
+type SemanticInvariantViolation = {
+  invariantId: string;
+  title: string;
+  severity: TaskInvariant["severity"];
+  reason: string;
+};
+
+type SemanticInvariantGateResult = {
+  passed: boolean;
+  violations: SemanticInvariantViolation[];
+  reason: string;
+  retryInstruction: string | null;
+  confidence: number;
+};
+
 type TaskOrchestrationResult = {
   structured: AssistantStructuredResult;
   taskRun: TaskRun;
-  newInvariants: TaskInvariant[];
   events: MemoryLayerEvent[];
   agentRuns: AgentRun[];
   swarmRuns: SwarmRun[];
-  stagePayloads: StagePayload[];
   transitions: TransitionDecision[];
   validationResult: ValidationResult | null;
 };
@@ -811,7 +823,6 @@ function formatInvariantsForPrompt(invariants: TaskInvariant[]) {
 
   return [
     "Active invariants:",
-    "Built-in invariants protect this host assistant and lifecycle. Do not apply host-product rules to arbitrary user-requested artifacts unless the task explicitly edits this app. The user may write requests in any language.",
     ...active.map(
       (invariant) =>
         `- [${invariant.severity}] ${invariant.title}: ${invariant.description} (source: ${invariant.source}; scope: ${invariant.scope}; stages: ${invariant.appliesTo.join(", ")})`,
@@ -923,36 +934,16 @@ function activeInvariantsForStage(
   globalInvariants: TaskInvariant[],
   taskInvariants: TaskInvariant[],
   stage: TaskState,
-  prompt = "",
 ) {
   return [...globalInvariants, ...taskInvariants].filter(
     (invariant) =>
       invariant.enabled &&
-      isInvariantRelevantToPrompt(invariant, prompt) &&
       (invariant.appliesTo.includes(stage) || invariant.appliesTo.length === 0),
   );
 }
 
-function isHostAssistantTask(prompt: string) {
-  return /(ai advent|this app|current app|assistant ui|settings|profile|memory|request context|task run|current project|repo|repository|эт[оа] приложение|текущ(?:ее|ий) прилож|ассистент|настройк|профил|памят|репозитор|проект)/iu.test(
-    prompt,
-  );
-}
-
-function isInvariantRelevantToPrompt(invariant: TaskInvariant, prompt: string) {
-  if (invariant.id !== "builtin-ui-english") {
-    return true;
-  }
-
-  return isHostAssistantTask(prompt);
-}
-
-function taskInvariantsForRun(
-  invariants: TaskInvariant[],
-  taskRun: TaskRun,
-) {
-  const refs = new Set(taskRun.invariantRefs);
-  return invariants.filter((invariant) => refs.has(invariant.id));
+function taskInvariantsForRun(taskRun: TaskRun) {
+  return taskRun.taskInvariants;
 }
 
 function buildTaskInvariant(input: {
@@ -965,6 +956,7 @@ function buildTaskInvariant(input: {
     id: makeMemoryLayerId("task-invariant"),
     title: input.title.trim().slice(0, 80) || "Task invariant",
     description: input.description.trim() || input.title.trim(),
+    dialogId: null,
     scope: "task",
     appliesTo: TASK_LIFECYCLE_STATES,
     severity: input.severity === "warning" ? "warning" : "blocker",
@@ -973,6 +965,56 @@ function buildTaskInvariant(input: {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function normalizeInvariantKey(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function isArchitectureInvariantDuplicate(
+  invariant: Pick<TaskInvariant, "title" | "description">,
+) {
+  const text = `${normalizeInvariantKey(invariant.title)} ${normalizeInvariantKey(
+    invariant.description,
+  )}`;
+  const architectureSignals = [
+    "english ui",
+    "visible product ui text must stay in english",
+    "host assistant ui language",
+    "unified assistant workflow",
+    "do not reintroduce day tabs",
+    "automatic context strategy",
+    "users should not have to choose context strategy manually",
+    "profile boundaries",
+    "only the active user profile",
+    "confirmed profile updates",
+    "must not be duplicated into long term memory",
+    "profile scoped branch context",
+    "selected branch summary and recent selected branch messages",
+    "validation before done",
+    "must not move to done until validation has passed",
+    "file backed memory boundaries",
+    "short term memory in json",
+  ];
+
+  return architectureSignals.some((signal) => text.includes(signal));
+}
+
+function mergeTaskInvariants(existing: TaskInvariant[], incoming: TaskInvariant[]) {
+  const byKey = new Map<string, TaskInvariant>();
+  for (const invariant of [...existing, ...incoming]) {
+    if (isArchitectureInvariantDuplicate(invariant)) {
+      continue;
+    }
+    byKey.set(
+      `${normalizeInvariantKey(invariant.title)}|${normalizeInvariantKey(
+        invariant.description,
+      )}`,
+      invariant,
+    );
+  }
+
+  return Array.from(byKey.values());
 }
 
 function isExplicitPlanApproval(prompt: string) {
@@ -1021,6 +1063,7 @@ function createInitialTaskRun(prompt: string): TaskRun {
       updatedAt: now,
     },
     invariantRefs: [],
+    taskInvariants: [],
     artifacts: [],
     agentRuns: [],
     swarmRuns: [],
@@ -1042,22 +1085,6 @@ function makeTransitionDecision(
     to,
     allowed,
     reason,
-    createdAt: new Date().toISOString(),
-  };
-}
-
-function makeStagePayload(input: {
-  stage: TaskState;
-  agentId: string;
-  role: string;
-  messages: ChatMessage[];
-}): StagePayload {
-  return {
-    id: makeMemoryLayerId("stage-payload"),
-    stage: input.stage,
-    agentId: input.agentId,
-    role: input.role,
-    messages: input.messages,
     createdAt: new Date().toISOString(),
   };
 }
@@ -1229,89 +1256,226 @@ function parseValidationAgentResult(answer: string) {
   }
 }
 
-function normalizeLexicalText(text: string) {
-  return text.toLowerCase().replace(/[^\p{L}\p{N}+#.\s-]/gu, " ");
-}
-
-function lexicalContains(text: string, term: string) {
-  const normalizedText = ` ${normalizeLexicalText(text).replace(/\s+/g, " ")} `;
-  const normalizedTerm = normalizeLexicalText(term).replace(/\s+/g, " ").trim();
-
-  if (!normalizedTerm || normalizedTerm.length < 3) {
-    return false;
-  }
-
-  return normalizedText.includes(` ${normalizedTerm} `);
-}
-
-function cleanForbiddenTerm(term: string) {
-  return term
-    .replace(/\b(until|unless|except|because|when|while|if|and|or|as|for|in|on|to|with|the|a|an|any|all|visible|product|current|primary|main|experience|workflow|strategy|manually|automatically|editable|separate)\b.*$/i, "")
-    .replace(/[.;:,()[\]{}"']/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function extractForbiddenTerms(invariant: TaskInvariant) {
-  const text = `${invariant.title}. ${invariant.description}`;
-  const genericTerms = new Set([
-    "done",
-    "validation",
-    "task",
-    "tasks",
-    "assistant",
-    "users",
-    "user",
-    "context",
-    "memory",
-  ]);
-  const patterns = [
-    /\b(?:do not|don't|must not|should not|never|no|avoid|forbidden|prohibit(?:ed)?|without)\s+([^.;\n]+)/gi,
-    /\b(?:must not|should not)\s+(?:use|include|add|create|reintroduce|select|choose|duplicate|move to|mark)\s+([^.;\n]+)/gi,
-  ];
-  const terms: string[] = [];
-
-  for (const pattern of patterns) {
-    for (const match of text.matchAll(pattern)) {
-      const raw = match[1] ?? "";
-      const withoutLeadingVerb = raw.replace(
-        /^(?:use|using|include|including|add|adding|create|creating|reintroduce|reintroducing|select|selecting|choose|choosing|duplicate|duplicating|move to|mark)\s+/i,
-        "",
-      );
-      const term = cleanForbiddenTerm(withoutLeadingVerb);
-      if (
-        term &&
-        normalizeWords(term).length <= 5 &&
-        !genericTerms.has(term.toLowerCase())
-      ) {
-        terms.push(term);
-      }
-    }
-  }
-
-  return uniqueStrings(terms, 8);
-}
-
-function detectBlockerInvariantConflicts(input: {
-  prompt: string;
-  executionDraft: string;
-  invariants: TaskInvariant[];
+function planningArtifactText(input: {
+  plan: string[];
+  requirementsContract: RequirementsContract;
+  aggregatedDecision: string;
 }) {
-  return input.invariants
-    .filter((invariant) => invariant.enabled && invariant.severity === "blocker")
-    .flatMap((invariant) =>
-      extractForbiddenTerms(invariant)
+  return [
+    input.aggregatedDecision,
+    input.plan.join("\n"),
+    formatRequirementsContract(input.requirementsContract),
+  ].join("\n\n");
+}
+
+function normalizeSemanticInvariantGateResult(
+  value: unknown,
+  invariants: TaskInvariant[],
+): SemanticInvariantGateResult {
+  const candidate = value as Partial<SemanticInvariantGateResult>;
+  const byId = new Map(invariants.map((invariant) => [invariant.id, invariant]));
+  const byTitle = new Map(
+    invariants.map((invariant) => [invariant.title.toLowerCase(), invariant]),
+  );
+  const violations = Array.isArray(candidate?.violations)
+    ? candidate.violations
+        .map((item) => {
+          const violation = item as Partial<SemanticInvariantViolation>;
+          const invariant =
+            (typeof violation.invariantId === "string"
+              ? byId.get(violation.invariantId)
+              : undefined) ??
+            (typeof violation.title === "string"
+              ? byTitle.get(violation.title.toLowerCase())
+              : undefined);
+
+          if (!invariant) {
+            return null;
+          }
+
+          return {
+            invariantId: invariant.id,
+            title: invariant.title,
+            severity: invariant.severity,
+            reason:
+              typeof violation.reason === "string" && violation.reason.trim()
+                ? violation.reason.trim()
+                : `The artifact violates ${invariant.title}.`,
+          };
+        })
         .filter(
-          (term) =>
-            lexicalContains(input.prompt, term) ||
-            lexicalContains(input.executionDraft, term),
+          (item): item is SemanticInvariantViolation => item !== null,
         )
-        .map((term) => ({
-          invariant,
-          term,
-          source: lexicalContains(input.executionDraft, term) ? "draft" : "prompt",
-        })),
+    : [];
+  const blockerFailed = violations.some(
+    (violation) => violation.severity === "blocker",
+  );
+
+  return {
+    passed: candidate?.passed === true && !blockerFailed,
+    violations,
+    reason:
+      typeof candidate?.reason === "string" && candidate.reason.trim()
+        ? candidate.reason.trim()
+        : blockerFailed
+          ? "The artifact violates active blocker invariants."
+          : "Semantic invariant gate passed.",
+    retryInstruction:
+      typeof candidate?.retryInstruction === "string" &&
+      candidate.retryInstruction.trim()
+        ? candidate.retryInstruction.trim()
+        : null,
+    confidence: normalizeConfidence(candidate?.confidence),
+  };
+}
+
+function parseSemanticInvariantGateResult(
+  answer: string,
+  invariants: TaskInvariant[],
+) {
+  return normalizeSemanticInvariantGateResult(
+    JSON.parse(extractJsonObject(answer)),
+    invariants,
+  );
+}
+
+function failClosedSemanticGateResult(
+  stage: TaskState,
+  invariants: TaskInvariant[],
+  reason: string,
+): SemanticInvariantGateResult {
+  const blockerInvariants = invariants.filter(
+    (invariant) => invariant.enabled && invariant.severity === "blocker",
+  );
+
+  return {
+    passed: blockerInvariants.length === 0,
+    violations: blockerInvariants.map((invariant) => ({
+      invariantId: invariant.id,
+      title: invariant.title,
+      severity: invariant.severity,
+      reason,
+    })),
+    reason:
+      blockerInvariants.length > 0
+        ? `${stage.charAt(0).toUpperCase() + stage.slice(1)} semantic invariant gate could not verify the artifact, so blocker invariants fail closed. ${reason}`
+        : reason,
+    retryInstruction:
+      blockerInvariants.length > 0
+        ? "Revise the artifact or retry after the semantic invariant gate can verify it."
+        : null,
+    confidence: 0,
+  };
+}
+
+async function runSemanticInvariantGate(input: {
+  stage: TaskState;
+  proposedTransition: string;
+  artifactTitle: string;
+  artifactText: string;
+  taskRun: TaskRun;
+  invariants: TaskInvariant[];
+  model?: string;
+}) {
+  const active = input.invariants.filter((invariant) => invariant.enabled);
+  if (!active.length) {
+    return {
+      passed: true,
+      violations: [],
+      reason: "No active invariants apply to this stage.",
+      retryInstruction: null,
+      confidence: 1,
+    } satisfies SemanticInvariantGateResult;
+  }
+
+  const messages: ChatMessage[] = [
+    {
+      role: "system",
+      content: [
+        "You are an internal semantic invariant gate for a lifecycle orchestrator.",
+        "Decide whether the proposed stage artifact semantically violates any active invariant.",
+        "Do not rely on keyword matching. Judge meaning, intent, and required behavior.",
+        "A blocker invariant violation must make passed=false. Warning violations may be reported without blocking.",
+        "Return only valid JSON. Do not wrap the JSON in markdown.",
+        "",
+        "JSON schema:",
+        '{"passed":true,"violations":[{"invariantId":"id","title":"title","severity":"blocker|warning","reason":"why this artifact violates the invariant"}],"reason":"short decision reason","retryInstruction":null,"confidence":0.0}',
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: [
+        `Stage: ${input.stage}`,
+        `Proposed transition: ${input.proposedTransition}`,
+        `Task: ${input.taskRun.context.task}`,
+        formatRequirementsContract(input.taskRun.context.requirementsContract),
+        "",
+        "Active invariants:",
+        ...active.map(
+          (invariant) =>
+            `- id: ${invariant.id}\n  title: ${invariant.title}\n  severity: ${invariant.severity}\n  scope: ${invariant.scope}\n  description: ${invariant.description}`,
+        ),
+        "",
+        `Artifact title: ${input.artifactTitle}`,
+        "Artifact:",
+        input.artifactText || "- empty",
+      ].join("\n"),
+    },
+  ];
+
+  try {
+    const result = await callLlm({
+      messages,
+      model: input.model,
+      temperature: 0,
+    });
+    return parseSemanticInvariantGateResult(result.answer, active);
+  } catch (error) {
+    return failClosedSemanticGateResult(
+      input.stage,
+      active,
+      error instanceof Error ? error.message : "Semantic gate failed.",
     );
+  }
+}
+
+function semanticGateFailed(gate: SemanticInvariantGateResult) {
+  return (
+    gate.violations.some((violation) => violation.severity === "blocker") ||
+    (!gate.passed && gate.violations.length === 0)
+  );
+}
+
+function formatSemanticGateReason(stage: TaskState, gate: SemanticInvariantGateResult) {
+  const blockerViolations = gate.violations.filter(
+    (violation) => violation.severity === "blocker",
+  );
+
+  return [
+    `${stage.charAt(0).toUpperCase() + stage.slice(1)} semantic invariant gate failed.`,
+    gate.reason,
+    ...blockerViolations.map(
+      (violation) => `${violation.title}: ${violation.reason}`,
+    ),
+  ].join(" ");
+}
+
+function contractWithInvariantConflict(
+  contract: RequirementsContract,
+  reason: string,
+): RequirementsContract {
+  return {
+    ...contract,
+    openQuestions: uniqueStrings(
+      [
+        ...contract.openQuestions,
+        `${reason} Please revise the request, choose an allowed alternative, or change the invariant.`,
+      ],
+      8,
+    ),
+    readyForApproval: false,
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 function buildStageMessages(input: {
@@ -1457,12 +1621,6 @@ async function runPlanningSwarm(input: {
       const parsed = parsePlanningAgentResult(result.answer);
       return {
         parsed,
-        payload: makeStagePayload({
-          stage: "planning",
-          agentId: agent.agentId,
-          role: agent.role,
-          messages,
-        }),
         run: makeAgentRun({
           agentId: agent.agentId,
           stage: "planning",
@@ -1552,7 +1710,6 @@ async function runPlanningSwarm(input: {
     question,
     swarmRun,
     agentRuns: outputs.map((output) => output.run),
-    stagePayloads: outputs.map((output) => output.payload),
   };
 }
 
@@ -1605,12 +1762,6 @@ async function runExecutionAgent(input: {
   return {
     parsed,
     run,
-    payload: makeStagePayload({
-      stage: "execution",
-      agentId: "execution-agent",
-      role: "Execution Agent",
-      messages,
-    }),
   };
 }
 
@@ -1646,64 +1797,6 @@ async function runValidationAgent(input: {
     longTermMemory: input.longTermMemory,
     executionDraft: input.executionDraft,
   });
-  const deterministicConflicts = detectBlockerInvariantConflicts({
-    prompt: input.prompt,
-    executionDraft: input.executionDraft,
-    invariants: input.invariants,
-  });
-  const deterministicFailedInvariants = uniqueStrings(
-    deterministicConflicts.map((conflict) => conflict.invariant.title),
-  );
-  const deterministicReason = deterministicConflicts.length
-    ? [
-        "Deterministic blocker gate failed before LLM validation.",
-        ...deterministicConflicts.map(
-          (conflict) =>
-            `${conflict.invariant.title}: ${conflict.source} contains forbidden term "${conflict.term}".`,
-        ),
-      ].join(" ")
-    : "";
-
-  if (deterministicConflicts.length > 0) {
-    const retryInstruction =
-      "Revise the draft or task request so it does not contain content forbidden by enabled blocker invariants.";
-    const run = makeAgentRun({
-      agentId: "validation-agent",
-      stage: "validation",
-      role: "Validation Agent",
-      inputSummary: input.executionDraft.slice(0, 240),
-      output: deterministicReason,
-      findings: [deterministicReason, ...deterministicFailedInvariants],
-      confidence: 1,
-    });
-    const validationResult: ValidationResult = {
-      passed: false,
-      reason: deterministicReason,
-      failedInvariants: deterministicFailedInvariants,
-      retryInstruction,
-      reviewerCount: 1,
-      createdAt: new Date().toISOString(),
-    };
-
-    return {
-      parsed: {
-        passed: false,
-        reason: deterministicReason,
-        failedInvariants: deterministicFailedInvariants,
-        retryInstruction,
-        confidence: 1,
-      },
-      run,
-      validationResult,
-      payload: makeStagePayload({
-        stage: "validation",
-        agentId: "validation-agent",
-        role: "Validation Agent",
-        messages,
-      }),
-    };
-  }
-
   const result = await callLlm({
     messages,
     model: input.model,
@@ -1738,12 +1831,6 @@ async function runValidationAgent(input: {
     },
     run,
     validationResult,
-    payload: makeStagePayload({
-      stage: "validation",
-      agentId: "validation-agent",
-      role: "Validation Agent",
-      messages,
-    }),
   };
 }
 
@@ -1825,12 +1912,6 @@ async function runDoneAgent(input: {
   return {
     structured,
     run,
-    payload: makeStagePayload({
-      stage: "done",
-      agentId: "done-agent",
-      role: "Done Agent",
-      messages,
-    }),
   };
 }
 
@@ -1963,11 +2044,9 @@ async function runTaskOrchestration(input: {
   const events: MemoryLayerEvent[] = [];
   const agentRuns: AgentRun[] = [];
   const swarmRuns: SwarmRun[] = [];
-  const stagePayloads: StagePayload[] = [];
   const transitions: TransitionDecision[] = [];
   const artifacts: StageArtifact[] = [];
-  const newInvariants: TaskInvariant[] = [];
-  let availableInvariants = input.globalInvariants;
+  const availableInvariants = input.globalInvariants;
   let validationResult: ValidationResult | null = null;
   const planApprovalGranted =
     taskRun.context.state === "planning" &&
@@ -1982,9 +2061,8 @@ async function runTaskOrchestration(input: {
   if (shouldPlan) {
     const planningInvariants = activeInvariantsForStage(
       availableInvariants,
-      taskInvariantsForRun(availableInvariants, taskRun),
+      taskInvariantsForRun(taskRun),
       "planning",
-      input.prompt,
     );
     const planning = await runPlanningSwarm({
       prompt: input.prompt,
@@ -1999,7 +2077,6 @@ async function runTaskOrchestration(input: {
       longTermMemory: input.longTermMemory,
     });
     agentRuns.push(...planning.agentRuns);
-    stagePayloads.push(...planning.stagePayloads);
     swarmRuns.push(planning.swarmRun);
     artifacts.push(
       makeStageArtifact(
@@ -2008,23 +2085,57 @@ async function runTaskOrchestration(input: {
         planning.swarmRun.aggregatedDecision,
       ),
     );
-    newInvariants.push(...planning.taskInvariants);
-    availableInvariants = [...availableInvariants, ...planning.taskInvariants];
+    const nextTaskInvariants = mergeTaskInvariants(
+      taskRun.taskInvariants,
+      planning.taskInvariants,
+    );
     const taskInvariantRefs = uniqueStrings([
       ...taskRun.invariantRefs,
-      ...planning.taskInvariants.map((invariant) => invariant.id),
+      ...nextTaskInvariants.map((invariant) => invariant.id),
     ]);
+    const nextPlanningInvariants = activeInvariantsForStage(
+      availableInvariants,
+      nextTaskInvariants,
+      "planning",
+    );
+    const planningGate = await runSemanticInvariantGate({
+      stage: "planning",
+      proposedTransition: "planning -> execution approval request",
+      artifactTitle: "Planning swarm decision",
+      artifactText: planningArtifactText({
+        plan: planning.plan,
+        requirementsContract: planning.requirementsContract,
+        aggregatedDecision: planning.swarmRun.aggregatedDecision,
+      }),
+      taskRun,
+      invariants: nextPlanningInvariants,
+      model: input.model,
+    });
 
-    if (planning.needsUserInput) {
+    if (planning.needsUserInput || semanticGateFailed(planningGate)) {
+      const invariantConflictReason = semanticGateFailed(planningGate)
+        ? formatSemanticGateReason("planning", planningGate)
+        : null;
+      const pausedContract = invariantConflictReason
+        ? contractWithInvariantConflict(
+            planning.requirementsContract,
+            invariantConflictReason,
+          )
+        : planning.requirementsContract;
+      const pausedQuestion =
+        invariantConflictReason ??
+        planning.question ??
+        "Planning paused for user input.";
       const pauseTransition = makeTransitionDecision(
         "planning",
         "planning",
-        planning.question || "Planning paused for user input.",
+        pausedQuestion,
       );
       transitions.push(pauseTransition);
       taskRun = {
         ...taskRun,
         invariantRefs: taskInvariantRefs,
+        taskInvariants: nextTaskInvariants,
         artifacts: [...taskRun.artifacts, ...artifacts],
         agentRuns: [...taskRun.agentRuns, ...agentRuns],
         swarmRuns: [...taskRun.swarmRuns, ...swarmRuns],
@@ -2032,12 +2143,12 @@ async function runTaskOrchestration(input: {
         context: updateTaskContext({
           taskRun,
           state: "planning",
-          plan: planning.plan,
+          plan: invariantConflictReason ? [] : planning.plan,
           done: taskRun.context.done,
-          current: planning.question || "Planning needs user input.",
-          pausedReason: planning.question,
+          current: pausedQuestion,
+          pausedReason: pausedQuestion,
           awaitingPlanApproval: false,
-          requirementsContract: planning.requirementsContract,
+          requirementsContract: pausedContract,
         }),
         updatedAt: new Date().toISOString(),
       };
@@ -2051,14 +2162,14 @@ async function runTaskOrchestration(input: {
       }));
       return {
         structured: buildPausedStructuredAnswer(
-          planning.question || "I need one more detail before I can plan this safely.",
+          invariantConflictReason ??
+            planning.question ??
+            "I need one more detail before I can plan this safely.",
         ),
         taskRun,
-        newInvariants,
         events,
         agentRuns,
         swarmRuns,
-        stagePayloads,
         transitions,
         validationResult,
       };
@@ -2078,6 +2189,7 @@ async function runTaskOrchestration(input: {
     taskRun = {
       ...taskRun,
       invariantRefs: taskInvariantRefs,
+      taskInvariants: nextTaskInvariants,
       artifacts: [...taskRun.artifacts, ...artifacts],
       agentRuns: [...taskRun.agentRuns, ...agentRuns],
       swarmRuns: [...taskRun.swarmRuns, ...swarmRuns],
@@ -2105,15 +2217,73 @@ async function runTaskOrchestration(input: {
     return {
       structured: buildPausedStructuredAnswer(approvalQuestion),
       taskRun,
-      newInvariants,
       events,
       agentRuns,
       swarmRuns,
-      stagePayloads,
       transitions,
       validationResult,
     };
   } else if (planApprovalGranted) {
+    const approvalInvariants = activeInvariantsForStage(
+      availableInvariants,
+      taskInvariantsForRun(taskRun),
+      "planning",
+    );
+    const latestPlanning = latestStageArtifact(taskRun, "planning");
+    const approvalGate = await runSemanticInvariantGate({
+      stage: "planning",
+      proposedTransition: "planning -> execution",
+      artifactTitle: "Approved planning artifact",
+      artifactText: planningArtifactText({
+        plan: taskRun.context.plan,
+        requirementsContract: taskRun.context.requirementsContract,
+        aggregatedDecision: latestPlanning?.content ?? taskRun.context.current,
+      }),
+      taskRun,
+      invariants: approvalInvariants,
+      model: input.model,
+    });
+
+    if (semanticGateFailed(approvalGate)) {
+      const reason = formatSemanticGateReason("planning", approvalGate);
+      const pauseTransition = makeTransitionDecision("planning", "planning", reason);
+      transitions.push(pauseTransition);
+      taskRun = {
+        ...taskRun,
+        transitions: [...taskRun.transitions, pauseTransition],
+        context: updateTaskContext({
+          taskRun,
+          state: "planning",
+          plan: [],
+          current: reason,
+          pausedReason: reason,
+          awaitingPlanApproval: false,
+          requirementsContract: contractWithInvariantConflict(
+            taskRun.context.requirementsContract,
+            reason,
+          ),
+        }),
+        updatedAt: new Date().toISOString(),
+      };
+      events.push(...taskEvents({
+        taskRun,
+        transitions,
+        agentRuns,
+        swarmRuns,
+        validationResult,
+        filePath: input.shortTermFilePath,
+      }));
+      return {
+        structured: buildPausedStructuredAnswer(reason),
+        taskRun,
+        events,
+        agentRuns,
+        swarmRuns,
+        transitions,
+        validationResult,
+      };
+    }
+
     const planningTransition = makeTransitionDecision(
       "planning",
       "execution",
@@ -2153,11 +2323,72 @@ async function runTaskOrchestration(input: {
     };
   }
 
+  if (taskRun.context.state === "execution") {
+    const approvedPlanInvariants = activeInvariantsForStage(
+      availableInvariants,
+      taskInvariantsForRun(taskRun),
+      "planning",
+    );
+    const latestPlanning = latestStageArtifact(taskRun, "planning");
+    const approvedPlanGate = await runSemanticInvariantGate({
+      stage: "planning",
+      proposedTransition: "execution continuation from saved plan",
+      artifactTitle: "Saved planning artifact",
+      artifactText: planningArtifactText({
+        plan: taskRun.context.plan,
+        requirementsContract: taskRun.context.requirementsContract,
+        aggregatedDecision: latestPlanning?.content ?? taskRun.context.current,
+      }),
+      taskRun,
+      invariants: approvedPlanInvariants,
+      model: input.model,
+    });
+
+    if (semanticGateFailed(approvedPlanGate)) {
+      const reason = formatSemanticGateReason("planning", approvedPlanGate);
+      const rollbackTransition = makeTransitionDecision("execution", "planning", reason);
+      transitions.push(rollbackTransition);
+      taskRun = {
+        ...taskRun,
+        transitions: [...taskRun.transitions, rollbackTransition],
+        context: updateTaskContext({
+          taskRun,
+          state: "planning",
+          plan: [],
+          current: reason,
+          pausedReason: reason,
+          awaitingPlanApproval: false,
+          requirementsContract: contractWithInvariantConflict(
+            taskRun.context.requirementsContract,
+            reason,
+          ),
+        }),
+        updatedAt: new Date().toISOString(),
+      };
+      events.push(...taskEvents({
+        taskRun,
+        transitions,
+        agentRuns,
+        swarmRuns,
+        validationResult,
+        filePath: input.shortTermFilePath,
+      }));
+      return {
+        structured: buildPausedStructuredAnswer(reason),
+        taskRun,
+        events,
+        agentRuns,
+        swarmRuns,
+        transitions,
+        validationResult,
+      };
+    }
+  }
+
   const executionInvariants = activeInvariantsForStage(
     availableInvariants,
-    taskInvariantsForRun(availableInvariants, taskRun),
+    taskInvariantsForRun(taskRun),
     "execution",
-    input.prompt,
   );
   const execution = await runExecutionAgent({
     prompt: input.prompt,
@@ -2172,10 +2403,56 @@ async function runTaskOrchestration(input: {
     longTermMemory: input.longTermMemory,
   });
   agentRuns.push(execution.run);
-  stagePayloads.push(execution.payload);
   artifacts.push(
     makeStageArtifact("execution", "Execution draft", execution.parsed.answerDraft),
   );
+  const executionGate = await runSemanticInvariantGate({
+    stage: "execution",
+    proposedTransition: "execution -> validation",
+    artifactTitle: "Execution draft",
+    artifactText: execution.parsed.answerDraft,
+    taskRun,
+    invariants: executionInvariants,
+    model: input.model,
+  });
+
+  if (semanticGateFailed(executionGate)) {
+    const reason = formatSemanticGateReason("execution", executionGate);
+    const pauseTransition = makeTransitionDecision("execution", "planning", reason);
+    transitions.push(pauseTransition);
+    taskRun = {
+      ...taskRun,
+      artifacts: [...taskRun.artifacts, artifacts[artifacts.length - 1]],
+      agentRuns: [...taskRun.agentRuns, execution.run],
+      transitions: [...taskRun.transitions, pauseTransition],
+      context: updateTaskContext({
+        taskRun,
+        state: "planning",
+        done: [...taskRun.context.done, ...execution.parsed.completed],
+        current: reason,
+        pausedReason: reason,
+        awaitingPlanApproval: false,
+      }),
+      updatedAt: new Date().toISOString(),
+    };
+    events.push(...taskEvents({
+      taskRun,
+      transitions,
+      agentRuns,
+      swarmRuns,
+      validationResult,
+      filePath: input.shortTermFilePath,
+    }));
+    return {
+      structured: buildPausedStructuredAnswer(reason),
+      taskRun,
+      events,
+      agentRuns,
+      swarmRuns,
+      transitions,
+      validationResult,
+    };
+  }
 
   if (execution.parsed.needsUserInput) {
     const pauseTransition = makeTransitionDecision(
@@ -2213,11 +2490,9 @@ async function runTaskOrchestration(input: {
         execution.parsed.question || "I need one more detail before execution can continue.",
       ),
       taskRun,
-      newInvariants,
       events,
       agentRuns,
       swarmRuns,
-      stagePayloads,
       transitions,
       validationResult,
     };
@@ -2246,9 +2521,8 @@ async function runTaskOrchestration(input: {
 
   const validationInvariants = activeInvariantsForStage(
     availableInvariants,
-    taskInvariantsForRun(availableInvariants, taskRun),
+    taskInvariantsForRun(taskRun),
     "validation",
-    input.prompt,
   );
   const validation = await runValidationAgent({
     prompt: input.prompt,
@@ -2264,23 +2538,58 @@ async function runTaskOrchestration(input: {
     executionDraft: execution.parsed.answerDraft,
   });
   agentRuns.push(validation.run);
-  stagePayloads.push(validation.payload);
-  validationResult = validation.validationResult;
+  const validationGate = await runSemanticInvariantGate({
+    stage: "validation",
+    proposedTransition: "validation -> done",
+    artifactTitle: "Validation draft review",
+    artifactText: [
+      "Execution draft:",
+      execution.parsed.answerDraft,
+      "",
+      "Validation agent result:",
+      validation.validationResult.reason,
+      `Passed: ${validation.validationResult.passed ? "yes" : "no"}`,
+    ].join("\n"),
+    taskRun,
+    invariants: validationInvariants,
+    model: input.model,
+  });
+  const validationParsed = semanticGateFailed(validationGate)
+    ? {
+        passed: false,
+        reason: formatSemanticGateReason("validation", validationGate),
+        failedInvariants: validationGate.violations.map(
+          (violation) => violation.title,
+        ),
+        retryInstruction: validationGate.retryInstruction,
+        confidence: validationGate.confidence,
+      }
+    : validation.parsed;
+  validationResult = semanticGateFailed(validationGate)
+    ? {
+        passed: false,
+        reason: validationParsed.reason,
+        failedInvariants: validationParsed.failedInvariants,
+        retryInstruction: validationParsed.retryInstruction,
+        reviewerCount: validation.validationResult.reviewerCount + 1,
+        createdAt: new Date().toISOString(),
+      }
+    : validation.validationResult;
   artifacts.push(
-    makeStageArtifact("validation", "Validation result", validation.validationResult.reason),
+    makeStageArtifact("validation", "Validation result", validationResult.reason),
   );
 
-  if (!validation.parsed.passed) {
+  if (!validationParsed.passed) {
     const blockedDoneTransition = makeTransitionDecision(
       "validation",
       "done",
-      validation.validationResult.reason,
+      validationResult.reason,
       false,
     );
     const failedTransition = makeTransitionDecision(
       "validation",
       "execution",
-      validation.parsed.retryInstruction ||
+      validationParsed.retryInstruction ||
         "Validation failed and returned the task to execution.",
       true,
     );
@@ -2296,9 +2605,9 @@ async function runTaskOrchestration(input: {
         taskRun,
         state: "execution",
         current:
-          validation.parsed.retryInstruction ||
+          validationParsed.retryInstruction ||
           "Revise the execution draft to satisfy validation.",
-        pausedReason: validation.parsed.reason,
+        pausedReason: validationParsed.reason,
         awaitingPlanApproval: false,
       }),
       updatedAt: new Date().toISOString(),
@@ -2315,38 +2624,29 @@ async function runTaskOrchestration(input: {
       structured: buildPausedStructuredAnswer(
         [
           "I cannot mark this task done yet because validation failed.",
-          validation.parsed.reason,
-          validation.parsed.retryInstruction
-            ? `Next: ${validation.parsed.retryInstruction}`
+          validationParsed.reason,
+          validationParsed.retryInstruction
+            ? `Next: ${validationParsed.retryInstruction}`
             : "I will keep the task in Execution until the issue is fixed.",
         ].join("\n\n"),
       ),
       taskRun,
-      newInvariants,
       events,
       agentRuns,
       swarmRuns,
-      stagePayloads,
       transitions,
       validationResult,
     };
   }
 
-  const validationTransition = makeTransitionDecision(
-    "validation",
-    "done",
-    "Validation passed; finalization is allowed.",
-  );
-  transitions.push(validationTransition);
   taskRun = {
     ...taskRun,
     artifacts: [...taskRun.artifacts, artifacts[artifacts.length - 1]],
     agentRuns: [...taskRun.agentRuns, validation.run],
-    transitions: [...taskRun.transitions, validationTransition],
     validationResult,
     context: updateTaskContext({
       taskRun,
-      state: "done",
+      state: "validation",
       done: [...taskRun.context.done, "Validation passed"],
       current: "Finalize response.",
       awaitingPlanApproval: false,
@@ -2356,9 +2656,8 @@ async function runTaskOrchestration(input: {
 
   const doneInvariants = activeInvariantsForStage(
     availableInvariants,
-    taskInvariantsForRun(availableInvariants, taskRun),
+    taskInvariantsForRun(taskRun),
     "done",
-    input.prompt,
   );
   const done = await runDoneAgent({
     prompt: input.prompt,
@@ -2377,12 +2676,83 @@ async function runTaskOrchestration(input: {
     currentProfileSuggestionCount: input.currentProfileSuggestionCount,
   });
   agentRuns.push(done.run);
-  stagePayloads.push(done.payload);
   artifacts.push(makeStageArtifact("done", "Final answer", done.structured.answer));
+  const doneGate = await runSemanticInvariantGate({
+    stage: "done",
+    proposedTransition: "validation -> done",
+    artifactTitle: "Final answer",
+    artifactText: done.structured.answer,
+    taskRun,
+    invariants: doneInvariants,
+    model: input.model,
+  });
+
+  if (semanticGateFailed(doneGate)) {
+    const reason = formatSemanticGateReason("done", doneGate);
+    const blockedDoneTransition = makeTransitionDecision(
+      "validation",
+      "done",
+      reason,
+      false,
+    );
+    const failedTransition = makeTransitionDecision(
+      "validation",
+      "execution",
+      "Done agent produced a final answer that violates active blocker invariants.",
+      true,
+    );
+    transitions.push(blockedDoneTransition);
+    transitions.push(failedTransition);
+    taskRun = {
+      ...taskRun,
+      artifacts: [...taskRun.artifacts, artifacts[artifacts.length - 1]],
+      agentRuns: [...taskRun.agentRuns, done.run],
+      transitions: [...taskRun.transitions, blockedDoneTransition, failedTransition],
+      context: updateTaskContext({
+        taskRun,
+        state: "execution",
+        current: reason,
+        pausedReason: reason,
+        awaitingPlanApproval: false,
+      }),
+      updatedAt: new Date().toISOString(),
+    };
+    events.push(...taskEvents({
+      taskRun,
+      transitions,
+      agentRuns,
+      swarmRuns,
+      validationResult,
+      filePath: input.shortTermFilePath,
+    }));
+    return {
+      structured: buildPausedStructuredAnswer(
+        [
+          "I cannot mark this task done yet because finalization failed.",
+          reason,
+          "I will keep the task in Execution until the issue is fixed.",
+        ].join("\n\n"),
+      ),
+      taskRun,
+      events,
+      agentRuns,
+      swarmRuns,
+      transitions,
+      validationResult,
+    };
+  }
+
+  const validationTransition = makeTransitionDecision(
+    "validation",
+    "done",
+    "Validation and final answer invariant checks passed; finalization is allowed.",
+  );
+  transitions.push(validationTransition);
   taskRun = {
     ...taskRun,
     artifacts: [...taskRun.artifacts, artifacts[artifacts.length - 1]],
     agentRuns: [...taskRun.agentRuns, done.run],
+    transitions: [...taskRun.transitions, validationTransition],
     context: updateTaskContext({
       taskRun,
       state: "done",
@@ -2404,11 +2774,9 @@ async function runTaskOrchestration(input: {
   return {
     structured: done.structured,
     taskRun,
-    newInvariants,
     events,
     agentRuns,
     swarmRuns,
-    stagePayloads,
     transitions,
     validationResult,
   };
@@ -2489,41 +2857,6 @@ function buildMessages(input: {
       content: input.prompt,
     },
   ];
-}
-
-function buildRequestContextDebug(input: {
-  activeProfile: UserProfile;
-  selectedBranch: MemoryBranch;
-  selectedBranchSummary: string;
-  recentMessages: ChatMessage[];
-  workingMemory: MemoryLayerNote[];
-  longTermMemory: MemoryLayerNote[];
-  taskRun: TaskRun | null;
-  invariantRefs: string[];
-  stageAgentInputs?: AgentRun[];
-  stagePayloads?: StagePayload[];
-  swarmRuns?: SwarmRun[];
-  transitionDecisions?: TransitionDecision[];
-  validationResult?: ValidationResult | null;
-  assembledMessages: ChatMessage[];
-}): RequestContextDebug {
-  return {
-    createdAt: new Date().toISOString(),
-    profile: input.activeProfile,
-    selectedBranchTitle: input.selectedBranch.title,
-    selectedBranchSummary: input.selectedBranchSummary,
-    recentMessages: input.recentMessages,
-    workingMemory: input.workingMemory,
-    longTermMemory: input.longTermMemory,
-    taskContext: input.taskRun?.context ?? null,
-    invariantRefs: input.invariantRefs,
-    stageAgentInputs: input.stageAgentInputs ?? [],
-    stagePayloads: input.stagePayloads ?? [],
-    swarmRuns: input.swarmRuns ?? [],
-    transitionDecisions: input.transitionDecisions ?? [],
-    validationResult: input.validationResult ?? null,
-    assembledMessages: input.assembledMessages,
-  };
 }
 
 function summarizeMetrics(rows: TokenMetricRow[]) {
@@ -2967,6 +3300,7 @@ export async function POST(request: Request) {
 
     const active = getActiveMemoryDialog(state);
     const activeProfile = getActiveUserProfile(state);
+    const activeDialogInvariants = getDialogInvariants(state, active.id);
     const selected = selectRelevantBranch(active, prompt, activeProfile.id);
     const selectedVisible = profileScopedMessages(
       selected.branch.messages,
@@ -3017,7 +3351,7 @@ export async function POST(request: Request) {
       {
         role: "system",
         content:
-          "Lifecycle-only debug snapshot. User turns are not sent through this message list directly; provider calls happen inside stage payloads after TaskContext is created.",
+          "Lifecycle-only metrics snapshot. User turns are not sent through this message list directly; provider calls happen inside stage agents after TaskContext is created.",
       },
       ...buildMessages({
         prompt,
@@ -3031,7 +3365,7 @@ export async function POST(request: Request) {
         needsSummary,
         currentProfileSuggestionCount: pendingProfileUpdates.length,
         taskRun: turnTaskRun,
-        invariants: state.invariants,
+        invariants: activeDialogInvariants,
       }),
     ];
     const startedAt = performance.now();
@@ -3045,7 +3379,7 @@ export async function POST(request: Request) {
       recentMessages,
       workingMemory: promptWorkingMemory.notes,
       longTermMemory: promptLongTermMemory.notes,
-      globalInvariants: state.invariants,
+      globalInvariants: activeDialogInvariants,
       needsSummary,
       currentProfileSuggestionCount: pendingProfileUpdates.length,
       shortTermFilePath: state.filePaths.shortTerm,
@@ -3063,38 +3397,6 @@ export async function POST(request: Request) {
       },
     };
     result.answer = JSON.stringify(structured);
-    const requestTaskRun = taskOrchestration.taskRun;
-    const nextInvariantMap = new Map(
-      state.invariants.map((invariant) => [invariant.id, invariant]),
-    );
-    for (const invariant of taskOrchestration.newInvariants) {
-      nextInvariantMap.set(invariant.id, invariant);
-    }
-    const nextInvariants = Array.from(nextInvariantMap.values());
-    const requestInvariantRefs = uniqueStrings(
-      [
-        ...state.invariants.map((invariant) => invariant.id),
-        ...(requestTaskRun?.invariantRefs ?? []),
-        ...taskOrchestration.newInvariants.map((invariant) => invariant.id),
-      ],
-      64,
-    );
-    const requestContext = buildRequestContextDebug({
-      activeProfile,
-      selectedBranch: selected.branch,
-      selectedBranchSummary,
-      recentMessages,
-      workingMemory: promptWorkingMemory.notes,
-      longTermMemory: promptLongTermMemory.notes,
-      taskRun: requestTaskRun,
-      invariantRefs: requestInvariantRefs,
-      stageAgentInputs: taskOrchestration.agentRuns,
-      stagePayloads: taskOrchestration.stagePayloads,
-      swarmRuns: taskOrchestration.swarmRuns,
-      transitionDecisions: taskOrchestration.transitions,
-      validationResult: taskOrchestration.validationResult,
-      assembledMessages: lifecycleDebugMessages,
-    });
     const filteredMemoryUpdates = filterProfilePreferenceMemoryUpdates(
       structured.memoryUpdates,
       pendingProfileUpdates,
@@ -3220,10 +3522,8 @@ export async function POST(request: Request) {
     const nextState = withUpdatedActiveMemoryDialog(
       addGlobalMetricRow({
         ...state,
-        invariants: nextInvariants,
         workingMemory: memoryUpdate.workingMemory,
         longTermMemory: memoryUpdate.longTermMemory,
-        lastRequestContext: requestContext,
         pendingProfileUpdates: addPendingProfileUpdates(
           state,
           pendingProfileUpdates,
