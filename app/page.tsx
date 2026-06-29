@@ -514,6 +514,50 @@ type SchedulerMcpToolState = {
   checkedAt: string;
 };
 
+type Day19BriefingAction = "extract" | "build" | "save" | "run_chain";
+
+type Day19BriefingStepState = {
+  toolName:
+    | "extract_briefing_messages"
+    | "build_challenge_digest"
+    | "save_challenge_digest";
+  status: "success" | "failed";
+  outputSummary?: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  error?: string | null;
+};
+
+type Day19BriefingStructuredContent = {
+  action: Day19BriefingAction;
+  message: string;
+  dataRoot: string | null;
+  extraction: Record<string, unknown> | null;
+  digest: Record<string, unknown> | null;
+  savedPaths: string[];
+  steps: Day19BriefingStepState[];
+  checkedAt: string;
+};
+
+type Day19BriefingToolState = {
+  connected: boolean;
+  serverName: string;
+  serverVersion: string | null;
+  transport: "stdio";
+  requestedAction: Day19BriefingAction;
+  arguments: {
+    action: Day19BriefingAction;
+  } & Record<string, unknown>;
+  tools: McpDiscoveredTool[];
+  steps: Day19BriefingStepState[];
+  structuredContent: Day19BriefingStructuredContent | null;
+  contentText: string | null;
+  error: string | null;
+  stderr: string | null;
+  checkedAt: string;
+};
+
 type ModelOption = {
   value: string;
   label: string;
@@ -863,6 +907,33 @@ async function loadSchedulerMcpTool(input: SchedulerMcpRequest = {}) {
   return payload as SchedulerMcpToolState;
 }
 
+type Day19BriefingRequest = {
+  action?: Day19BriefingAction;
+  dataRoot?: string;
+  targetDays?: number[];
+  priorityAuthors?: string[];
+  keywords?: string[];
+  maxMessages?: number;
+  selectionMode?: "cached_relevant" | "focused";
+  messageLimit?: number;
+  extractionPath?: string;
+  digestPath?: string;
+};
+
+async function loadDay19BriefingTool(input: Day19BriefingRequest = {}) {
+  const response = await fetch("/api/agent/mcp-day19", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(input),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Failed to call Day 19 briefing MCP tool.");
+  }
+  return payload as Day19BriefingToolState;
+}
+
 async function runMemoryLayersAction(input: {
   action:
     | "create_dialog"
@@ -998,6 +1069,9 @@ export default function Home() {
   const [schedulerMcpState, setSchedulerMcpState] =
     useState<SchedulerMcpToolState | null>(null);
   const [schedulerMcpLoading, setSchedulerMcpLoading] = useState(false);
+  const [day19BriefingState, setDay19BriefingState] =
+    useState<Day19BriefingToolState | null>(null);
+  const [day19BriefingLoading, setDay19BriefingLoading] = useState(false);
   const [recentMessages, setRecentMessages] = useState("4");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -1420,6 +1494,45 @@ export default function Home() {
       });
     } finally {
       setSchedulerMcpLoading(false);
+    }
+  }
+
+  async function refreshDay19BriefingTool(
+    action: Day19BriefingAction = "run_chain",
+  ) {
+    setDay19BriefingLoading(true);
+    setError("");
+    try {
+      const nextState = await loadDay19BriefingTool({
+        action,
+        dataRoot: schedulerMcpState?.structuredContent?.dataRoot,
+      });
+      setDay19BriefingState(nextState);
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error
+          ? requestError.message
+          : "Unexpected Day 19 briefing MCP error.";
+      setError(message);
+      setDay19BriefingState({
+        connected: false,
+        serverName: "ai-advent-day19-briefing",
+        serverVersion: null,
+        transport: "stdio",
+        requestedAction: action,
+        arguments: {
+          action,
+        },
+        tools: [],
+        steps: [],
+        structuredContent: null,
+        contentText: null,
+        error: message,
+        stderr: null,
+        checkedAt: new Date().toISOString(),
+      });
+    } finally {
+      setDay19BriefingLoading(false);
     }
   }
 
@@ -2172,6 +2285,8 @@ Solve the task as a group of experts:
               events={memoryLayerEvents}
               lab={memoryLayersLab}
               loading={loading}
+              day19BriefingLoading={day19BriefingLoading}
+              day19BriefingState={day19BriefingState}
               gitMcpLoading={gitMcpLoading}
               gitMcpState={gitMcpState}
               mcpToolsLoading={mcpToolsLoading}
@@ -2189,6 +2304,7 @@ Solve the task as a group of experts:
               onSelect={setActiveMemoryLayersDialog}
               onSend={sendMemoryLayersMessage}
               onMemoryFolderMove={moveMemoryFolder}
+              onDay19BriefingRun={refreshDay19BriefingTool}
               onGitMcpRun={refreshGitMcpTool}
               onMcpToolsRefresh={refreshMcpTools}
               onSchedulerMcpRun={refreshSchedulerMcpTool}
@@ -3737,6 +3853,149 @@ function SchedulerMcpToolPanel({
   );
 }
 
+function recordString(value: Record<string, unknown> | null | undefined, key: string) {
+  const item = value?.[key];
+  return typeof item === "string" ? item : null;
+}
+
+function recordNumber(value: Record<string, unknown> | null | undefined, key: string) {
+  const item = value?.[key];
+  return typeof item === "number" && Number.isFinite(item) ? item : null;
+}
+
+function recordObject(value: Record<string, unknown> | null | undefined, key: string) {
+  const item = value?.[key];
+  return item && typeof item === "object" && !Array.isArray(item)
+    ? (item as Record<string, unknown>)
+    : null;
+}
+
+function Day19BriefingMcpPanel({
+  loading,
+  onRun,
+  state,
+}: {
+  loading: boolean;
+  onRun: (action?: Day19BriefingAction) => void;
+  state: Day19BriefingToolState | null;
+}) {
+  const status = state?.connected ? "Connected" : state ? "Failed" : "Not checked";
+  const structured = state?.structuredContent;
+  const extraction = structured?.extraction;
+  const digest = structured?.digest;
+  const totals = recordObject(digest, "totals");
+  const selectedCount =
+    recordNumber(extraction, "selectedMessageCount") ??
+    recordNumber(totals, "selectedMessageCount") ??
+    0;
+  const totalCached =
+    recordNumber(extraction, "totalCachedMessages") ??
+    recordNumber(totals, "totalCachedMessages") ??
+    0;
+  const digestTitle = recordString(digest, "title") ?? "No digest built yet.";
+  const digestSummary =
+    recordString(digest, "summary") ?? structured?.message ?? "Run the chain to build a digest.";
+  const savedPaths = structured?.savedPaths ?? [];
+  const steps = structured?.steps ?? state?.steps ?? [];
+
+  return (
+    <section className="mcp-tools-panel">
+      <div className="mcp-tools-head">
+        <div>
+          <span>Day 19 Briefing MCP</span>
+          <strong>{status}</strong>
+        </div>
+        <div className="mcp-tools-actions">
+          <button
+            className="secondary-action"
+            disabled={loading}
+            onClick={() => onRun("run_chain")}
+            type="button"
+          >
+            {loading && state?.requestedAction === "run_chain"
+              ? "Running..."
+              : "Run chain"}
+          </button>
+          <button
+            className="secondary-action"
+            disabled={loading}
+            onClick={() => onRun("extract")}
+            type="button"
+          >
+            Extract
+          </button>
+          <button
+            className="secondary-action"
+            disabled={loading}
+            onClick={() => onRun("build")}
+            type="button"
+          >
+            Build digest
+          </button>
+          <button
+            className="secondary-action"
+            disabled={loading}
+            onClick={() => onRun("save")}
+            type="button"
+          >
+            Save digest
+          </button>
+        </div>
+      </div>
+      {state && (
+        <div className="mcp-tools-meta">
+          <span>Server: {state.serverName}</span>
+          <span>Transport: {state.transport}</span>
+          <span>Action: {state.requestedAction}</span>
+          {state.serverVersion && <span>Version: {state.serverVersion}</span>}
+          <span>Checked: {formatLocalDateTime(state.checkedAt)}</span>
+        </div>
+      )}
+      {state?.error && <p className="mcp-tools-error">{state.error}</p>}
+      <ul className="mcp-tools-list">
+        <li>
+          <strong>Tool chain</strong>
+          <span>
+            {"extract_briefing_messages -> build_challenge_digest -> save_challenge_digest"}
+          </span>
+          <small>{structured?.message ?? "Run the chain to call Day 19 MCP tools."}</small>
+        </li>
+        <li>
+          <strong>Extraction</strong>
+          <span>
+            {selectedCount} selected from {totalCached} cached message(s)
+          </span>
+          <small>Data root: {structured?.dataRoot ?? "n/a"}</small>
+        </li>
+        <li>
+          <strong>Digest</strong>
+          <span>{digestTitle}</span>
+          <small>{digestSummary}</small>
+        </li>
+        <li>
+          <strong>Saved files</strong>
+          <span className="mcp-tools-preline">
+            {savedPaths.length ? savedPaths.join("\n") : "No digest saved yet."}
+          </span>
+        </li>
+        <li>
+          <strong>MCP tool call trace</strong>
+          <span className="mcp-tools-preline">
+            {steps.length
+              ? steps
+                  .map(
+                    (step) =>
+                      `${formatLocalDateTime(step.startedAt)} | ${step.status} | ${step.toolName} | ${formatRunDuration(step.durationMs)} | ${step.outputSummary ?? step.error ?? "no details"}`,
+                  )
+                  .join("\n")
+              : "No Day 19 tool calls yet."}
+          </span>
+        </li>
+      </ul>
+    </section>
+  );
+}
+
 function TaskRunPanel({
   invariants,
   taskRun,
@@ -3856,6 +4115,8 @@ function TaskRunPanel({
 
 function MemoryLayersView({
   activeDialog,
+  day19BriefingLoading,
+  day19BriefingState,
   events,
   gitMcpLoading,
   gitMcpState,
@@ -3875,6 +4136,7 @@ function MemoryLayersView({
   onRename,
   onSelect,
   onSend,
+  onDay19BriefingRun,
   onGitMcpRun,
   onMemoryFolderMove,
   onMcpToolsRefresh,
@@ -3892,6 +4154,8 @@ function MemoryLayersView({
   setPrompt,
 }: {
   activeDialog: MemoryDialog | null;
+  day19BriefingLoading: boolean;
+  day19BriefingState: Day19BriefingToolState | null;
   events: MemoryLayerEvent[];
   gitMcpLoading: boolean;
   gitMcpState: GitMcpToolState | null;
@@ -3911,6 +4175,7 @@ function MemoryLayersView({
   onRename: (dialog: MemoryDialog) => void;
   onSelect: (dialogId: string) => void;
   onSend: (event: FormEvent<HTMLFormElement>) => void;
+  onDay19BriefingRun: (action?: Day19BriefingAction) => void;
   onGitMcpRun: () => void;
   onMemoryFolderMove: (memoryFolder: string) => void;
   onMcpToolsRefresh: () => void;
@@ -4042,6 +4307,11 @@ function MemoryLayersView({
             loading={schedulerMcpLoading}
             onRun={onSchedulerMcpRun}
             state={schedulerMcpState}
+          />
+          <Day19BriefingMcpPanel
+            loading={day19BriefingLoading}
+            onRun={onDay19BriefingRun}
+            state={day19BriefingState}
           />
           <ConversationHistory messages={activeDialog.messages} />
           <div className="branch-summary">
