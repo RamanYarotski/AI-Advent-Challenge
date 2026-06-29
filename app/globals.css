@@ -732,6 +732,10 @@ textarea:focus {
   font-weight: 800;
 }
 
+.mcp-tools-preline {
+  white-space: pre-line;
+}
+
 .empty-task-run {
   align-items: center;
   grid-template-columns: minmax(0, 1fr) auto;

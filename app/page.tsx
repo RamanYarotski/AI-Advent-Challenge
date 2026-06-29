@@ -330,6 +330,45 @@ type McpToolsState = {
   checkedAt: string;
 };
 
+type GitMcpChangedFile = {
+  status: string;
+  path: string;
+  raw: string;
+};
+
+type GitMcpRecentCommit = {
+  hash: string;
+  subject: string;
+};
+
+type GitMcpRepositoryStatus = {
+  repositoryRoot: string;
+  branch: string;
+  isClean: boolean;
+  changedFileCount: number;
+  changedFiles: GitMcpChangedFile[];
+  recentCommits: GitMcpRecentCommit[];
+  checkedAt: string;
+};
+
+type GitMcpToolState = {
+  connected: boolean;
+  serverName: string;
+  serverVersion: string | null;
+  transport: "stdio";
+  toolName: "get_repository_status";
+  arguments: {
+    includeChangedFiles: boolean;
+    includeRecentCommits: boolean;
+  };
+  tools: McpDiscoveredTool[];
+  structuredContent: GitMcpRepositoryStatus | null;
+  contentText: string | null;
+  error: string | null;
+  stderr: string | null;
+  checkedAt: string;
+};
+
 type ModelOption = {
   value: string;
   label: string;
@@ -637,6 +676,17 @@ async function loadMcpTools() {
   return payload as McpToolsState;
 }
 
+async function loadGitMcpTool() {
+  const response = await fetch("/api/agent/mcp-day17", {
+    cache: "no-store",
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Failed to call Day 17 Git MCP tool.");
+  }
+  return payload as GitMcpToolState;
+}
+
 async function runMemoryLayersAction(input: {
   action:
     | "create_dialog"
@@ -767,6 +817,8 @@ export default function Home() {
   const [memoryLayerEvents, setMemoryLayerEvents] = useState<MemoryLayerEvent[]>([]);
   const [mcpToolsState, setMcpToolsState] = useState<McpToolsState | null>(null);
   const [mcpToolsLoading, setMcpToolsLoading] = useState(false);
+  const [gitMcpState, setGitMcpState] = useState<GitMcpToolState | null>(null);
+  const [gitMcpLoading, setGitMcpLoading] = useState(false);
   const [recentMessages, setRecentMessages] = useState("4");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -980,6 +1032,40 @@ export default function Home() {
       });
     } finally {
       setMcpToolsLoading(false);
+    }
+  }
+
+  async function refreshGitMcpTool() {
+    setGitMcpLoading(true);
+    setError("");
+    try {
+      const nextState = await loadGitMcpTool();
+      setGitMcpState(nextState);
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error
+          ? requestError.message
+          : "Unexpected Day 17 Git MCP error.";
+      setError(message);
+      setGitMcpState({
+        connected: false,
+        serverName: "ai-advent-day17-git",
+        serverVersion: null,
+        transport: "stdio",
+        toolName: "get_repository_status",
+        arguments: {
+          includeChangedFiles: true,
+          includeRecentCommits: true,
+        },
+        tools: [],
+        structuredContent: null,
+        contentText: null,
+        error: message,
+        stderr: null,
+        checkedAt: new Date().toISOString(),
+      });
+    } finally {
+      setGitMcpLoading(false);
     }
   }
 
@@ -1732,6 +1818,8 @@ Solve the task as a group of experts:
               events={memoryLayerEvents}
               lab={memoryLayersLab}
               loading={loading}
+              gitMcpLoading={gitMcpLoading}
+              gitMcpState={gitMcpState}
               mcpToolsLoading={mcpToolsLoading}
               mcpToolsState={mcpToolsState}
               model={model}
@@ -1745,6 +1833,7 @@ Solve the task as a group of experts:
               onSelect={setActiveMemoryLayersDialog}
               onSend={sendMemoryLayersMessage}
               onMemoryFolderMove={moveMemoryFolder}
+              onGitMcpRun={refreshGitMcpTool}
               onMcpToolsRefresh={refreshMcpTools}
               onProfileApplySuggestion={applyProfileUpdate}
               onProfileApplySuggestions={applyAllProfileUpdates}
@@ -2753,6 +2842,83 @@ function McpToolsPanel({
   );
 }
 
+function GitMcpToolPanel({
+  loading,
+  onRun,
+  state,
+}: {
+  loading: boolean;
+  onRun: () => void;
+  state: GitMcpToolState | null;
+}) {
+  const status = state?.connected ? "Connected" : state ? "Failed" : "Not checked";
+  const repositoryStatus = state?.structuredContent;
+  const changedFiles = repositoryStatus?.changedFiles.slice(0, 6) ?? [];
+  const recentCommits = repositoryStatus?.recentCommits.slice(0, 5) ?? [];
+
+  return (
+    <section className="mcp-tools-panel">
+      <div className="mcp-tools-head">
+        <div>
+          <span>Day 17 Git MCP</span>
+          <strong>{status}</strong>
+        </div>
+        <button
+          className="secondary-action"
+          disabled={loading}
+          onClick={onRun}
+          type="button"
+        >
+          {loading ? "Running..." : "Run Git MCP tool"}
+        </button>
+      </div>
+      {state && (
+        <div className="mcp-tools-meta">
+          <span>Server: {state.serverName}</span>
+          <span>Tool: {state.toolName}</span>
+          <span>Transport: {state.transport}</span>
+          {state.serverVersion && <span>Version: {state.serverVersion}</span>}
+        </div>
+      )}
+      {state?.error && <p className="mcp-tools-error">{state.error}</p>}
+      {repositoryStatus && (
+        <ul className="mcp-tools-list">
+          <li>
+            <strong>Repository</strong>
+            <span>{repositoryStatus.repositoryRoot}</span>
+            <small>Branch: {repositoryStatus.branch || "unknown"}</small>
+          </li>
+          <li>
+            <strong>Working tree</strong>
+            <span>{repositoryStatus.isClean ? "Clean" : "Has changes"}</span>
+            <small>Changed files: {repositoryStatus.changedFileCount}</small>
+          </li>
+          <li>
+            <strong>Changed files</strong>
+            <span className="mcp-tools-preline">
+              {changedFiles.length
+                ? changedFiles
+                    .map((file) => `${file.status}: ${file.path}`)
+                    .join("\n")
+                : "No changed files returned."}
+            </span>
+          </li>
+          <li>
+            <strong>Recent commits</strong>
+            <span className="mcp-tools-preline">
+              {recentCommits.length
+                ? recentCommits
+                    .map((commit) => `${commit.hash}: ${commit.subject}`)
+                    .join("\n")
+                : "No commits returned."}
+            </span>
+          </li>
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function TaskRunPanel({
   invariants,
   taskRun,
@@ -2873,6 +3039,8 @@ function TaskRunPanel({
 function MemoryLayersView({
   activeDialog,
   events,
+  gitMcpLoading,
+  gitMcpState,
   lab,
   loading,
   mcpToolsLoading,
@@ -2887,6 +3055,7 @@ function MemoryLayersView({
   onRename,
   onSelect,
   onSend,
+  onGitMcpRun,
   onMemoryFolderMove,
   onMcpToolsRefresh,
   onProfileApplySuggestion,
@@ -2903,6 +3072,8 @@ function MemoryLayersView({
 }: {
   activeDialog: MemoryDialog | null;
   events: MemoryLayerEvent[];
+  gitMcpLoading: boolean;
+  gitMcpState: GitMcpToolState | null;
   lab: MemoryLayersState;
   loading: boolean;
   mcpToolsLoading: boolean;
@@ -2917,6 +3088,7 @@ function MemoryLayersView({
   onRename: (dialog: MemoryDialog) => void;
   onSelect: (dialogId: string) => void;
   onSend: (event: FormEvent<HTMLFormElement>) => void;
+  onGitMcpRun: () => void;
   onMemoryFolderMove: (memoryFolder: string) => void;
   onMcpToolsRefresh: () => void;
   onProfileApplySuggestion: (profileUpdateId: string) => void;
@@ -3033,6 +3205,11 @@ function MemoryLayersView({
             loading={mcpToolsLoading}
             onRefresh={onMcpToolsRefresh}
             state={mcpToolsState}
+          />
+          <GitMcpToolPanel
+            loading={gitMcpLoading}
+            onRun={onGitMcpRun}
+            state={gitMcpState}
           />
           <ConversationHistory messages={activeDialog.messages} />
           <div className="branch-summary">

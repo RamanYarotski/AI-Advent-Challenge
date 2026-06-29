@@ -48,6 +48,10 @@ import {
 } from "@/lib/agent/memory-layers-store";
 import { callLlm, type ChatMessage, type LlmResult } from "@/lib/llm";
 import {
+  callGitRepositoryStatusTool,
+  type GitMcpToolCallResult,
+} from "@/lib/mcp/day17-git-tool";
+import {
   estimateMessageTokens,
   estimateTextTokens,
   getProviderResponseTokens,
@@ -231,6 +235,69 @@ function formatNotes(title: string, notes: MemoryLayerNote[]) {
     .slice(-16)
     .map((note) => `- ${note.text}`)
     .join("\n")}`;
+}
+
+function shouldAttachGitMcpContext(prompt: string, taskRun: TaskRun) {
+  const text = [
+    prompt,
+    taskRun.context.task,
+    taskRun.context.current,
+    taskRun.context.plan.join(" "),
+  ].join(" ");
+
+  return /\bday\s*17\b|день\s*17|mcp|git|repository|repo|status|branch|commit|project state|working tree|инструмент|репозит|статус|ветк|коммит/iu.test(
+    text,
+  );
+}
+
+function formatGitMcpContext(result: GitMcpToolCallResult) {
+  if (!result.connected || !result.structuredContent) {
+    return [
+      "Day 17 MCP Git tool result:",
+      `- Tool: ${result.toolName}`,
+      "- Connected: no",
+      `- Error: ${result.error ?? "No structured result was returned."}`,
+      "- Treat this as unavailable project-state context.",
+    ].join("\n");
+  }
+
+  const status = result.structuredContent;
+  const changedFiles = status.changedFiles.slice(0, 8);
+  const recentCommits = status.recentCommits.slice(0, 5);
+
+  return [
+    "Day 17 MCP Git tool result:",
+    `- Tool: ${result.toolName}`,
+    "- Connected: yes",
+    `- Repository root: ${status.repositoryRoot}`,
+    `- Branch: ${status.branch || "unknown"}`,
+    `- Working tree: ${status.isClean ? "clean" : "has changes"}`,
+    `- Changed files: ${status.changedFileCount}`,
+    changedFiles.length
+      ? `- Changed file details:\n${changedFiles
+          .map((file) => `  - ${file.status}: ${file.path}`)
+          .join("\n")}`
+      : "- Changed file details: none",
+    recentCommits.length
+      ? `- Recent commits:\n${recentCommits
+          .map((commit) => `  - ${commit.hash}: ${commit.subject}`)
+          .join("\n")}`
+      : "- Recent commits: none requested or none returned",
+    "Use these facts as read-only repository data. The agent remains responsible for analysis, summary, and next-step recommendations.",
+  ].join("\n");
+}
+
+function formatGitMcpEventDetail(result: GitMcpToolCallResult) {
+  if (!result.connected || !result.structuredContent) {
+    return `Day 17 Git MCP tool call failed: ${
+      result.error ?? "No structured result was returned."
+    }`;
+  }
+
+  const status = result.structuredContent;
+  return `Day 17 Git MCP tool called ${result.toolName}; branch ${status.branch}, ${
+    status.isClean ? "clean working tree" : `${status.changedFileCount} changed file(s)`
+  }, ${status.recentCommits.length} recent commit(s) returned.`;
 }
 
 function normalizeWords(text: string) {
@@ -1711,6 +1778,7 @@ async function runPlanningSwarm(input: {
   recentMessages: ChatMessage[];
   workingMemory: MemoryLayerNote[];
   longTermMemory: MemoryLayerNote[];
+  gitMcpContext?: string | null;
 }) {
   const agents = [
     {
@@ -1751,12 +1819,17 @@ async function runPlanningSwarm(input: {
         workingMemory: input.workingMemory,
         longTermMemory: input.longTermMemory,
         extraContext: [
-          "Planning contract rules:",
-          "- Fill requirementsContract as the main Planning artifact.",
-          "- Do not invent high-impact unknowns. Put them in openQuestions.",
-          "- readyForApproval can be true only when goal, target/location, concrete requirements, acceptance criteria, and openQuestions are complete.",
-          "- The orchestrator will not enter Execution until this contract is complete and the user explicitly approves the plan.",
-        ].join("\n"),
+          [
+            "Planning contract rules:",
+            "- Fill requirementsContract as the main Planning artifact.",
+            "- Do not invent high-impact unknowns. Put them in openQuestions.",
+            "- readyForApproval can be true only when goal, target/location, concrete requirements, acceptance criteria, and openQuestions are complete.",
+            "- The orchestrator will not enter Execution until this contract is complete and the user explicitly approves the plan.",
+          ].join("\n"),
+          input.gitMcpContext || "",
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
       });
       const result = await callLlm({
         messages,
@@ -1869,6 +1942,7 @@ async function runExecutionAgent(input: {
   recentMessages: ChatMessage[];
   workingMemory: MemoryLayerNote[];
   longTermMemory: MemoryLayerNote[];
+  gitMcpContext?: string | null;
 }) {
   const messages = buildStageMessages({
     prompt: input.prompt,
@@ -1887,6 +1961,7 @@ async function runExecutionAgent(input: {
     recentMessages: input.recentMessages,
     workingMemory: input.workingMemory,
     longTermMemory: input.longTermMemory,
+    extraContext: input.gitMcpContext || undefined,
   });
   const result = await callLlm({
     messages,
@@ -1922,6 +1997,7 @@ async function runValidationAgent(input: {
   workingMemory: MemoryLayerNote[];
   longTermMemory: MemoryLayerNote[];
   executionDraft: string;
+  gitMcpContext?: string | null;
 }) {
   const messages = buildStageMessages({
     prompt: input.prompt,
@@ -1941,6 +2017,7 @@ async function runValidationAgent(input: {
     workingMemory: input.workingMemory,
     longTermMemory: input.longTermMemory,
     executionDraft: input.executionDraft,
+    extraContext: input.gitMcpContext || undefined,
   });
   const result = await callLlm({
     messages,
@@ -1994,6 +2071,7 @@ async function runDoneAgent(input: {
   validationResult: ValidationResult;
   needsSummary: boolean;
   currentProfileSuggestionCount: number;
+  gitMcpContext?: string | null;
 }) {
   const messages = [
     {
@@ -2031,6 +2109,7 @@ async function runDoneAgent(input: {
         input.needsSummary
           ? "Branch summary may be updated if the final answer introduces durable topic context."
           : "Keep branch summary unchanged unless the final answer clearly improves it.",
+        input.gitMcpContext || "",
       ].join("\n\n"),
     },
     {
@@ -2186,6 +2265,7 @@ async function runTaskOrchestration(input: {
   needsSummary: boolean;
   currentProfileSuggestionCount: number;
   shortTermFilePath: string;
+  gitMcpContext?: string | null;
 }): Promise<TaskOrchestrationResult> {
   let taskRun = prepareTaskRunForPlanningTurn(input.initialTaskRun, input.prompt);
   const events: MemoryLayerEvent[] = [];
@@ -2222,6 +2302,7 @@ async function runTaskOrchestration(input: {
       recentMessages: input.recentMessages,
       workingMemory: input.workingMemory,
       longTermMemory: input.longTermMemory,
+      gitMcpContext: input.gitMcpContext,
     });
     agentRuns.push(...planning.agentRuns);
     swarmRuns.push(planning.swarmRun);
@@ -2538,6 +2619,7 @@ async function runTaskOrchestration(input: {
           validationResult: acceptedValidationResult,
           needsSummary: input.needsSummary,
           currentProfileSuggestionCount: input.currentProfileSuggestionCount,
+          gitMcpContext: input.gitMcpContext,
         });
         agentRuns.push(done.run);
         artifacts.push(makeStageArtifact("done", "Final answer", done.structured.answer));
@@ -2726,6 +2808,7 @@ async function runTaskOrchestration(input: {
     recentMessages: input.recentMessages,
     workingMemory: input.workingMemory,
     longTermMemory: input.longTermMemory,
+    gitMcpContext: input.gitMcpContext,
   });
   agentRuns.push(execution.run);
   artifacts.push(
@@ -2861,6 +2944,7 @@ async function runTaskOrchestration(input: {
     workingMemory: input.workingMemory,
     longTermMemory: input.longTermMemory,
     executionDraft: execution.parsed.answerDraft,
+    gitMcpContext: input.gitMcpContext,
   });
   agentRuns.push(validation.run);
   const validationGate = await runSemanticInvariantGate({
@@ -3660,6 +3744,12 @@ export async function POST(request: Request) {
       sourceText: update.sourceText || prompt,
       confidence: update.confidence,
     }));
+    let gitMcpResult: GitMcpToolCallResult | null = null;
+    let gitMcpContext: string | null = null;
+    if (shouldAttachGitMcpContext(prompt, turnTaskRun)) {
+      gitMcpResult = await callGitRepositoryStatusTool();
+      gitMcpContext = formatGitMcpContext(gitMcpResult);
+    }
     const filePathsText = [
       "Memory files:",
       `- Short-term branch JSON: ${state.filePaths.shortTerm}`,
@@ -3702,6 +3792,7 @@ export async function POST(request: Request) {
       needsSummary,
       currentProfileSuggestionCount: pendingProfileUpdates.length,
       shortTermFilePath: state.filePaths.shortTerm,
+      gitMcpContext,
     });
     const structured = taskOrchestration.structured;
     const result: LlmResult = {
@@ -3805,9 +3896,22 @@ export async function POST(request: Request) {
           `Profile-like memory filtered from prompt: ${promptWorkingMemory.removedCount + promptLongTermMemory.removedCount}.`,
           "Injected profile fields: role/context, style, format, constraints.",
           "Task orchestration: lifecycle-only mode captured stage agents, planning swarm, transition checks, and validation result.",
+          gitMcpContext
+            ? "Day 17 Git MCP result was injected into stage-agent context."
+            : "Day 17 Git MCP result was not needed for this turn.",
         ].join("\n"),
         filePath: state.filePaths.shortTerm,
       },
+      ...(gitMcpResult
+        ? [
+            {
+              layer: "shortTerm" as const,
+              action: "prompt_context" as const,
+              detail: formatGitMcpEventDetail(gitMcpResult),
+              filePath: state.filePaths.shortTerm,
+            },
+          ]
+        : []),
       {
         layer: "longTerm",
         action: pendingProfileUpdates.length > 0 ? "needs_confirmation" : "skipped",
