@@ -312,6 +312,24 @@ type MemoryLayersState = {
   filePaths: MemoryFilePaths;
 };
 
+type McpDiscoveredTool = {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+};
+
+type McpToolsState = {
+  connected: boolean;
+  serverName: string;
+  serverVersion: string | null;
+  transport: "stdio";
+  allowedRoot: string;
+  tools: McpDiscoveredTool[];
+  error: string | null;
+  stderr: string | null;
+  checkedAt: string;
+};
+
 type ModelOption = {
   value: string;
   label: string;
@@ -608,6 +626,17 @@ async function loadMemoryLayersLab() {
   return payload as MemoryLayersState;
 }
 
+async function loadMcpTools() {
+  const response = await fetch("/api/agent/mcp-tools", {
+    cache: "no-store",
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Failed to list MCP tools.");
+  }
+  return payload as McpToolsState;
+}
+
 async function runMemoryLayersAction(input: {
   action:
     | "create_dialog"
@@ -736,6 +765,8 @@ export default function Home() {
   const [memoryLayersLab, setMemoryLayersLab] =
     useState<MemoryLayersState | null>(null);
   const [memoryLayerEvents, setMemoryLayerEvents] = useState<MemoryLayerEvent[]>([]);
+  const [mcpToolsState, setMcpToolsState] = useState<McpToolsState | null>(null);
+  const [mcpToolsLoading, setMcpToolsLoading] = useState(false);
   const [recentMessages, setRecentMessages] = useState("4");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -923,6 +954,34 @@ export default function Home() {
       ) ?? memoryLayersLab.dialogs[0]
     );
   }, [memoryLayersLab]);
+
+  async function refreshMcpTools() {
+    setMcpToolsLoading(true);
+    setError("");
+    try {
+      const nextState = await loadMcpTools();
+      setMcpToolsState(nextState);
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error
+          ? requestError.message
+          : "Unexpected MCP tools error.";
+      setError(message);
+      setMcpToolsState({
+        connected: false,
+        serverName: "filesystem",
+        serverVersion: null,
+        transport: "stdio",
+        allowedRoot: "",
+        tools: [],
+        error: message,
+        stderr: null,
+        checkedAt: new Date().toISOString(),
+      });
+    } finally {
+      setMcpToolsLoading(false);
+    }
+  }
 
   async function updateTokenLab(
     action: Parameters<typeof runTokenAction>[0],
@@ -1673,6 +1732,8 @@ Solve the task as a group of experts:
               events={memoryLayerEvents}
               lab={memoryLayersLab}
               loading={loading}
+              mcpToolsLoading={mcpToolsLoading}
+              mcpToolsState={mcpToolsState}
               model={model}
               onCreate={createMemoryLayersDialog}
               onDelete={deleteMemoryLayersDialog}
@@ -1684,6 +1745,7 @@ Solve the task as a group of experts:
               onSelect={setActiveMemoryLayersDialog}
               onSend={sendMemoryLayersMessage}
               onMemoryFolderMove={moveMemoryFolder}
+              onMcpToolsRefresh={refreshMcpTools}
               onProfileApplySuggestion={applyProfileUpdate}
               onProfileApplySuggestions={applyAllProfileUpdates}
               onProfileCreate={createUserProfile}
@@ -2625,6 +2687,72 @@ function taskStateTitle(state: TaskState) {
   return state.charAt(0).toUpperCase() + state.slice(1);
 }
 
+function schemaFieldSummary(schema: Record<string, unknown>) {
+  const properties = schema.properties;
+  if (!properties || typeof properties !== "object") {
+    return "Input schema: object";
+  }
+
+  const fields = Object.keys(properties);
+  return fields.length
+    ? `Inputs: ${fields.slice(0, 5).join(", ")}${fields.length > 5 ? ", ..." : ""}`
+    : "Inputs: none";
+}
+
+function McpToolsPanel({
+  loading,
+  onRefresh,
+  state,
+}: {
+  loading: boolean;
+  onRefresh: () => void;
+  state: McpToolsState | null;
+}) {
+  const status = state?.connected ? "Connected" : state ? "Failed" : "Not checked";
+
+  return (
+    <section className="mcp-tools-panel">
+      <div className="mcp-tools-head">
+        <div>
+          <span>MCP tools</span>
+          <strong>{status}</strong>
+        </div>
+        <button
+          className="secondary-action"
+          disabled={loading}
+          onClick={onRefresh}
+          type="button"
+        >
+          {loading ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+      {state && (
+        <div className="mcp-tools-meta">
+          <span>Server: {state.serverName}</span>
+          <span>Transport: {state.transport}</span>
+          {state.serverVersion && <span>Version: {state.serverVersion}</span>}
+          {state.allowedRoot && <span>Root: {state.allowedRoot}</span>}
+        </div>
+      )}
+      {state?.error && <p className="mcp-tools-error">{state.error}</p>}
+      {state?.connected && (
+        <ul className="mcp-tools-list">
+          {state.tools.map((tool) => (
+            <li key={tool.name}>
+              <strong>{tool.name}</strong>
+              <span>{tool.description || "No description provided."}</span>
+              <small>{schemaFieldSummary(tool.inputSchema)}</small>
+            </li>
+          ))}
+        </ul>
+      )}
+      {state?.connected && state.tools.length === 0 && (
+        <p className="mcp-tools-empty">No tools returned.</p>
+      )}
+    </section>
+  );
+}
+
 function TaskRunPanel({
   invariants,
   taskRun,
@@ -2747,6 +2875,8 @@ function MemoryLayersView({
   events,
   lab,
   loading,
+  mcpToolsLoading,
+  mcpToolsState,
   model,
   onCreate,
   onDelete,
@@ -2758,6 +2888,7 @@ function MemoryLayersView({
   onSelect,
   onSend,
   onMemoryFolderMove,
+  onMcpToolsRefresh,
   onProfileApplySuggestion,
   onProfileApplySuggestions,
   onProfileCreate,
@@ -2774,6 +2905,8 @@ function MemoryLayersView({
   events: MemoryLayerEvent[];
   lab: MemoryLayersState;
   loading: boolean;
+  mcpToolsLoading: boolean;
+  mcpToolsState: McpToolsState | null;
   model: string;
   onCreate: () => void;
   onDelete: (dialog: MemoryDialog) => void;
@@ -2785,6 +2918,7 @@ function MemoryLayersView({
   onSelect: (dialogId: string) => void;
   onSend: (event: FormEvent<HTMLFormElement>) => void;
   onMemoryFolderMove: (memoryFolder: string) => void;
+  onMcpToolsRefresh: () => void;
   onProfileApplySuggestion: (profileUpdateId: string) => void;
   onProfileApplySuggestions: (profileId: string) => void;
   onProfileCreate: (name: string) => void;
@@ -2894,6 +3028,11 @@ function MemoryLayersView({
           <TaskRunPanel
             invariants={activeDialogInvariants}
             taskRun={activeDialog.taskRun}
+          />
+          <McpToolsPanel
+            loading={mcpToolsLoading}
+            onRefresh={onMcpToolsRefresh}
+            state={mcpToolsState}
           />
           <ConversationHistory messages={activeDialog.messages} />
           <div className="branch-summary">
