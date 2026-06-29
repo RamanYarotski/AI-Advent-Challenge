@@ -784,7 +784,7 @@ function formatCost(value: number | null | undefined) {
 
 export default function Home() {
   const [activeDay] = useState<DayKey>("day12");
-  const [prompt, setPrompt] = useState(defaultPrompts.day12);
+  const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState(defaultModel);
   const [formatInstruction, setFormatInstruction] = useState(
     "Return JSON with the fields summary, bullets, and final_marker.",
