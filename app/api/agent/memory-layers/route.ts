@@ -250,26 +250,93 @@ function shouldAttachGitMcpContext(prompt: string, taskRun: TaskRun) {
   );
 }
 
-function isReadOnlyProjectStatusPrompt(prompt: string) {
-  const normalized = prompt.trim().toLowerCase();
-  if (!normalized) {
-    return false;
-  }
+type GitMcpQuestionIntent = {
+  anyMcpSignal: boolean;
+  mutationIntent: boolean;
+  repository: boolean;
+  branch: boolean;
+  workingTree: boolean;
+  changedFiles: boolean;
+  commits: boolean;
+  upstream: boolean;
+  push: boolean;
+  mcp: boolean;
+  buttons: boolean;
+  broadStatus: boolean;
+  correction: boolean;
+};
 
+function classifyGitMcpQuestion(prompt: string): GitMcpQuestionIntent {
+  const normalized = prompt.trim().toLowerCase();
   const implementationIntent = /(?:^|\s)(implement|create|build|add|fix|change|update|refactor|write|code|реализуй|создай|добавь|исправь|поменяй|обнови|напиши|сделай)(?:\s|$)/iu.test(
     normalized,
   );
-  const statusSignal = /(?:git|repository|repo|project|status|branch|commit|working tree|changed files|ahead|behind|push|mcp|\u0432\u0435\u0442\u043a|\u0441\u0442\u0430\u0442\u0443\u0441|\u0441\u043e\u0441\u0442\u043e\u044f\u043d|\u043a\u043e\u043c\u043c\u0438\u0442|\u0438\u0437\u043c\u0435\u043d\u0435\u043d|\u043f\u0443\u0448|\u043f\u0440\u043e\u0435\u043a\u0442|\u0440\u0435\u043f\u043e\u0437\u0438\u0442)/iu.test(
+  const mutationIntent = /(?:^|\s)(merge|checkout|switch|reset|rebase|stash|stage|delete|remove|execute|deploy|закоммить|коммить|запуш|пушни|переключи|удали|запусти|выполни)(?:\s|$)/iu.test(
     normalized,
   );
-  const readOnlyIntent = /(?:\?|what|which|where|current|check|show|tell|can|ready|\u043d\u0430\s+\u043a\u0430\u043a\u043e\u0439|\u043a\u0430\u043a\u0430\u044f|\u0433\u0434\u0435|\u0441\u0435\u0439\u0447\u0430\u0441|\u043f\u0440\u043e\u0432\u0435\u0440|\u043f\u043e\u043a\u0430\u0436|\u0441\u043a\u0430\u0436|\u043c\u043e\u0436\u043d\u043e|\u0433\u043e\u0442\u043e\u0432)/iu.test(
+  const repository = /(?:repository|repo|\u0440\u0435\u043f\u043e\u0437\u0438\u0442)/iu.test(
     normalized,
   );
-  const directStatusQuestion = /(?:current\s+branch|which\s+branch|what\s+branch|git\s+status|repository\s+status|project\s+status|working\s+tree|changed\s+files|\u043d\u0430\s+\u043a\u0430\u043a\u043e\u0439\s+\u0432\u0435\u0442\u043a|\u043a\u0430\u043a\u0430\u044f\s+\u0432\u0435\u0442\u043a|\u0447\u0442\u043e\s+\u0438\u0437\u043c\u0435\u043d|\u043c\u043e\u0436\u043d\u043e\s+\u043f\u0443\u0448|\u0441\u043e\u0441\u0442\u043e\u044f\u043d\w*\s+\u043f\u0440\u043e\u0435\u043a\u0442)/iu.test(
+  const branch = /(?:branch|\u0432\u0435\u0442\u043a)/iu.test(normalized);
+  const workingTree = /(?:git\s+status|status|working\s+tree|clean|dirty|\u0441\u0442\u0430\u0442\u0443\u0441|\u0441\u043e\u0441\u0442\u043e\u044f\u043d)/iu.test(
     normalized,
   );
+  const changedFiles = /(?:changed\s+files|changes|diff|modified|dirty|\u0438\u0437\u043c\u0435\u043d\u0435\u043d|\u0447\u0442\u043e\s+\u0438\u0437\u043c\u0435\u043d)/iu.test(
+    normalized,
+  );
+  const commits = /(?:commit|commits|\u043a\u043e\u043c\u043c\u0438\u0442)/iu.test(
+    normalized,
+  );
+  const upstream = /(?:upstream|ahead|behind|\u0430\u043f\u0441\u0442\u0440\u0438\u043c|\u0432\u043f\u0435\u0440\u0435\u0434\u0438|\u043f\u043e\u0437\u0430\u0434\u0438)/iu.test(
+    normalized,
+  );
+  const push = /(?:push|pushing|\u043f\u0443\u0448|\u0437\u0430\u043f\u0443\u0448)/iu.test(
+    normalized,
+  );
+  const mcp = /(?:mcp|tool|\u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442)/iu.test(
+    normalized,
+  );
+  const buttons = /(?:button|buttons|click|refresh|run git mcp|\u043a\u043d\u043e\u043f\u043a|\u043a\u043b\u0438\u043a|\u043d\u0430\u0436\u0430\u0442|\u0440\u0430\u0437\u043d\u0438\u0446|\u0441\u043c\u044b\u0441\u043b|\u043f\u043e\u043b\u044c\u0437)/iu.test(
+    normalized,
+  ) && mcp;
+  const broadStatus = /(?:project\s+state|project\s+status|repository\s+status|git\s+status|\u0441\u043e\u0441\u0442\u043e\u044f\u043d\w*\s+\u043f\u0440\u043e\u0435\u043a\u0442|\u0441\u0442\u0430\u0442\u0443\u0441\s+\u0440\u0435\u043f\u043e\u0437\u0438\u0442)/iu.test(
+    normalized,
+  );
+  const correction = /(?:you did not answer|didn't answer|not what i asked|\u043d\u0435\s+\u043e\u0442\u0432\u0435\u0442|\u043d\u0435\s+\u0441\u043f\u0440\u0430\u0448\u0438\u0432)/iu.test(
+    normalized,
+  );
+  const anyMcpSignal =
+    repository ||
+    branch ||
+    workingTree ||
+    changedFiles ||
+    commits ||
+    upstream ||
+    push ||
+    mcp ||
+    buttons ||
+    broadStatus;
 
-  return (directStatusQuestion || (statusSignal && readOnlyIntent)) && !implementationIntent;
+  return {
+    anyMcpSignal,
+    mutationIntent: implementationIntent || mutationIntent,
+    repository,
+    branch,
+    workingTree,
+    changedFiles,
+    commits,
+    upstream,
+    push,
+    mcp,
+    buttons,
+    broadStatus,
+    correction,
+  };
+}
+
+function isReadOnlyProjectStatusPrompt(prompt: string) {
+  const intent = classifyGitMcpQuestion(prompt);
+  return intent.anyMcpSignal && !intent.mutationIntent;
 }
 
 function formatGitMcpContext(result: GitMcpToolCallResult) {
@@ -328,7 +395,74 @@ function formatGitMcpEventDetail(result: GitMcpToolCallResult) {
   }, ${status.recentCommits.length} recent commit(s) returned.`;
 }
 
-function formatReadOnlyGitMcpAnswer(result: GitMcpToolCallResult) {
+function gitMcpRepositoryName(repositoryRoot: string) {
+  const parts = repositoryRoot.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || repositoryRoot || "unknown";
+}
+
+function formatGitMcpChangedFiles(status: NonNullable<GitMcpToolCallResult["structuredContent"]>) {
+  if (status.changedFileCount === 0) {
+    return "Измененных файлов нет.";
+  }
+
+  const visibleFiles = status.changedFiles.slice(0, 8);
+  const suffix =
+    status.changedFileCount > visibleFiles.length
+      ? `\nИ еще ${status.changedFileCount - visibleFiles.length} file(s).`
+      : "";
+
+  return [
+    `Измененные файлы (${status.changedFileCount}):`,
+    ...visibleFiles.map((file) => `- ${file.status}: ${file.path}`),
+  ].join("\n") + suffix;
+}
+
+function formatGitMcpRecentCommits(status: NonNullable<GitMcpToolCallResult["structuredContent"]>) {
+  if (status.recentCommits.length === 0) {
+    return "Последние commit(s) не вернулись.";
+  }
+
+  return [
+    "Последние commit(s):",
+    ...status.recentCommits
+      .slice(0, 5)
+      .map((commit) => `- ${commit.hash}: ${commit.subject}`),
+  ].join("\n");
+}
+
+function formatGitMcpPushStatus(status: NonNullable<GitMcpToolCallResult["structuredContent"]>) {
+  if (!status.upstream) {
+    return "Upstream для текущей ветки не настроен, поэтому MCP не может сказать, есть ли что push относительно remote.";
+  }
+
+  const ahead = status.ahead ?? 0;
+  const behind = status.behind ?? 0;
+  if (ahead > 0) {
+    return `Upstream: ${status.upstream}. Ветка ahead ${ahead}, behind ${behind}; есть commit(s), которые можно push.`;
+  }
+
+  return `Upstream: ${status.upstream}. Ветка ahead ${ahead}, behind ${behind}; новых commit(s) для push относительно upstream нет.`;
+}
+
+function formatGitMcpButtonsAnswer(result: GitMcpToolCallResult) {
+  const status = result.structuredContent;
+  const repository = status
+    ? `${gitMcpRepositoryName(status.repositoryRoot)} (${status.repositoryRoot})`
+    : "structuredContent не вернулся";
+
+  return [
+    "Кнопки в UI нужны как ручная проверка и демонстрация MCP без участия LLM.",
+    "`Refresh` в блоке MCP TOOLS проверяет discovery: какие MCP tools зарегистрированы и видны приложению.",
+    "`Run Git MCP tool` вызывает Day 17 tool `get_repository_status` и показывает raw facts: репозиторий, ветку, changed files и commits.",
+    "Чатовая часть не нажимает эти кнопки. Для MCP/status вопросов агент вызывает тот же backend helper сам, получает structuredContent и уже из него формирует ответ.",
+    `Текущая проверка MCP: connected=${result.connected}, tool=${result.toolName}, repository=${repository}.`,
+  ].join("\n");
+}
+
+function formatReadOnlyGitMcpAnswer(
+  result: GitMcpToolCallResult,
+  prompt: string,
+) {
   if (!result.connected || !result.structuredContent) {
     return [
       "Не смог проверить состояние репозитория через Day 17 Git MCP tool.",
@@ -336,27 +470,91 @@ function formatReadOnlyGitMcpAnswer(result: GitMcpToolCallResult) {
     ].join("\n");
   }
 
+  const intent = classifyGitMcpQuestion(prompt);
   const status = result.structuredContent;
   const latestCommit = status.recentCommits[0];
-  const upstreamText = status.upstream
-    ? `${status.upstream}, ahead ${status.ahead ?? "n/a"}, behind ${status.behind ?? "n/a"}`
-    : "upstream не настроен для текущей ветки";
-  const pushText =
-    status.ahead !== null && status.ahead > 0
-      ? `Есть ${status.ahead} commit(s), которые можно push.`
-      : status.ahead === 0
-        ? "Новых commit(s) для push относительно upstream нет."
-        : "Сказать, есть ли что push относительно upstream, нельзя: upstream не настроен.";
+  const repositoryName = gitMcpRepositoryName(status.repositoryRoot);
 
-  return [
-    `Сейчас мы на ветке \`${status.branch || "unknown"}\`.`,
-    `Рабочее дерево: ${status.isClean ? "clean" : `есть ${status.changedFileCount} измененных file(s)`}.`,
-    `Upstream: ${upstreamText}.`,
-    latestCommit
-      ? `Последний commit: \`${latestCommit.hash}\` ${latestCommit.subject}.`
-      : "Последние commit(s) не вернулись.",
-    pushText,
-  ].join("\n");
+  if (intent.buttons) {
+    return formatGitMcpButtonsAnswer(result);
+  }
+
+  if (
+    intent.repository &&
+    !intent.branch &&
+    !intent.workingTree &&
+    !intent.changedFiles &&
+    !intent.commits &&
+    !intent.upstream &&
+    !intent.push &&
+    !intent.broadStatus
+  ) {
+    return [
+      intent.correction
+        ? "Да, отвечаю именно про репозиторий."
+        : "Сейчас мы в таком репозитории:",
+      `\`${repositoryName}\``,
+      `Путь: \`${status.repositoryRoot}\`.`,
+      `Источник фактов: Day 17 MCP tool \`${result.toolName}\`.`,
+    ].join("\n");
+  }
+
+  if (
+    intent.mcp &&
+    !intent.repository &&
+    !intent.branch &&
+    !intent.workingTree &&
+    !intent.changedFiles &&
+    !intent.commits &&
+    !intent.upstream &&
+    !intent.push
+  ) {
+    return [
+      `Day 17 Git MCP подключен: ${result.connected ? "yes" : "no"}.`,
+      `Tool: \`${result.toolName}\`.`,
+      `Server: \`${result.serverName}\`${result.serverVersion ? ` v${result.serverVersion}` : ""}.`,
+      `Structured result получен для репозитория \`${repositoryName}\` на ветке \`${status.branch || "unknown"}\`.`,
+    ].join("\n");
+  }
+
+  const lines: string[] = [];
+  const wantsBroadOverview =
+    intent.broadStatus ||
+    (!intent.repository &&
+      !intent.branch &&
+      !intent.workingTree &&
+      !intent.changedFiles &&
+      !intent.commits &&
+      !intent.upstream &&
+      !intent.push);
+
+  if (wantsBroadOverview || intent.repository) {
+    lines.push(`Репозиторий: \`${repositoryName}\` (${status.repositoryRoot}).`);
+  }
+  if (wantsBroadOverview || intent.branch) {
+    lines.push(`Текущая ветка: \`${status.branch || "unknown"}\`.`);
+  }
+  if (wantsBroadOverview || intent.workingTree) {
+    lines.push(
+      `Рабочее дерево: ${
+        status.isClean ? "clean" : `есть ${status.changedFileCount} измененных file(s)`
+      }.`,
+    );
+  }
+  if (wantsBroadOverview || intent.upstream || intent.push) {
+    lines.push(formatGitMcpPushStatus(status));
+  }
+  if (wantsBroadOverview || intent.changedFiles) {
+    lines.push(formatGitMcpChangedFiles(status));
+  }
+  if (wantsBroadOverview || intent.commits) {
+    lines.push(formatGitMcpRecentCommits(status));
+  } else if (latestCommit && intent.branch) {
+    lines.push(`Последний commit: \`${latestCommit.hash}\` ${latestCommit.subject}.`);
+  }
+
+  lines.push(`Источник фактов: Day 17 MCP tool \`${result.toolName}\`.`);
+  return lines.join("\n");
 }
 
 function normalizeWords(text: string) {
@@ -3785,7 +3983,7 @@ export async function POST(request: Request) {
       const startedAt = performance.now();
       const gitMcpResult = await callGitRepositoryStatusTool();
       const gitMcpContext = formatGitMcpContext(gitMcpResult);
-      const assistantAnswer = formatReadOnlyGitMcpAnswer(gitMcpResult);
+      const assistantAnswer = formatReadOnlyGitMcpAnswer(gitMcpResult, prompt);
       const structured: AssistantStructuredResult = {
         answer: assistantAnswer,
         branch: {
