@@ -52,6 +52,11 @@ import {
   type GitMcpToolCallResult,
 } from "@/lib/mcp/day17-git-tool";
 import {
+  callDay18SchedulerTool,
+  type Day18SchedulerAction,
+  type Day18SchedulerToolCallResult,
+} from "@/lib/mcp/day18-scheduler-tool";
+import {
   estimateMessageTokens,
   estimateTextTokens,
   getProviderResponseTokens,
@@ -337,6 +342,245 @@ function classifyGitMcpQuestion(prompt: string): GitMcpQuestionIntent {
 function isReadOnlyProjectStatusPrompt(prompt: string) {
   const intent = classifyGitMcpQuestion(prompt);
   return intent.anyMcpSignal && !intent.mutationIntent;
+}
+
+type Day18SchedulerIntent = {
+  anySchedulerSignal: boolean;
+  implementationIntent: boolean;
+  action: Day18SchedulerAction;
+  intervalSeconds: number;
+};
+
+function parseDay18SchedulerIntervalSeconds(prompt: string) {
+  const normalized = prompt.toLowerCase();
+  const intervalMatch = normalized.match(
+    /(?:every|each|interval|\u043a\u0430\u0436\u0434[\p{L}]*|\u0440\u0430\u0437\s+\u0432)\s+(\d+)\s*(s|sec|second|seconds|m|min|minute|minutes|\u0441|\u0441\u0435\u043a|\u0441\u0435\u043a\u0443\u043d\u0434[\p{L}]*|\u043c\u0438\u043d|\u043c\u0438\u043d\u0443\u0442[\p{L}]*)/iu,
+  );
+  if (!intervalMatch) {
+    return 10;
+  }
+
+  const value = Number.parseInt(intervalMatch[1], 10);
+  if (!Number.isFinite(value)) {
+    return 10;
+  }
+
+  const unit = intervalMatch[2];
+  const multiplier = /^(m|min|minute|minutes|\u043c\u0438\u043d)/iu.test(unit)
+    ? 60
+    : 1;
+
+  return Math.max(2, Math.min(3600, value * multiplier));
+}
+
+function classifyDay18SchedulerPrompt(prompt: string): Day18SchedulerIntent {
+  const normalized = prompt.trim().toLowerCase();
+  const implementationIntent = /(?:^|\s)(implement|create|build|add|fix|change|update|refactor|write|code|\u0440\u0435\u0430\u043b\u0438\u0437\u0443\u0439|\u0441\u043e\u0437\u0434\u0430\u0439|\u0434\u043e\u0431\u0430\u0432\u044c|\u0438\u0441\u043f\u0440\u0430\u0432\u044c|\u043f\u043e\u043c\u0435\u043d\u044f\u0439|\u043e\u0431\u043d\u043e\u0432\u0438|\u043d\u0430\u043f\u0438\u0448\u0438|\u0441\u0434\u0435\u043b\u0430\u0439)(?:\s|$)/iu.test(
+    normalized,
+  );
+  const day18 = /(?:day\s*18|\u0434\u0435\u043d[\p{L}]*\s*18)/iu.test(
+    normalized,
+  );
+  const scheduler = /(?:scheduler|schedule|scheduled|background|heartbeat|reminder|periodic|cron|\u043f\u043b\u0430\u043d\u0438\u0440\u043e\u0432|\u0440\u0430\u0441\u043f\u0438\u0441|\u0444\u043e\u043d\u043e\u0432|\u043d\u0430\u043f\u043e\u043c\u0438\u043d|\u043f\u0435\u0440\u0438\u043e\u0434\u0438\u0447|\u0441\u0432\u043e\u0434\u043a|\u0430\u0433\u0440\u0435\u0433)/iu.test(
+    normalized,
+  );
+  const anySchedulerSignal = scheduler || day18;
+  const reset = /(?:reset|clear|\u0441\u0431\u0440\u043e\u0441|\u043e\u0447\u0438\u0441\u0442)/iu.test(
+    normalized,
+  );
+  const stop = /(?:stop|disable|pause|\u043e\u0441\u0442\u0430\u043d\u043e\u0432|\u0432\u044b\u043a\u043b\u044e\u0447|\u043f\u0430\u0443\u0437)/iu.test(
+    normalized,
+  );
+  const tick = /(?:tick|trigger|now|manual|\u0441\u0435\u0439\u0447\u0430\u0441|\u0441\u0440\u0430\u0431\u043e\u0442|\u0440\u0430\u0437\u043e\u0432|\u0440\u0443\u0447\u043d)/iu.test(
+    normalized,
+  );
+  const start = /(?:start|run|enable|\u0437\u0430\u043f\u0443\u0441\u0442|\u0441\u0442\u0430\u0440\u0442|\u043d\u0430\u0447\u043d|\u0432\u043a\u043b\u044e\u0447)/iu.test(
+    normalized,
+  );
+  const action: Day18SchedulerAction = reset
+    ? "reset"
+    : stop
+      ? "stop"
+      : tick
+        ? "tick"
+        : start
+          ? "start"
+          : "status";
+
+  return {
+    anySchedulerSignal,
+    implementationIntent,
+    action,
+    intervalSeconds: parseDay18SchedulerIntervalSeconds(prompt),
+  };
+}
+
+function formatDay18SchedulerContext(result: Day18SchedulerToolCallResult) {
+  if (!result.connected || !result.structuredContent) {
+    return [
+      "Day 18 scheduler MCP tool result:",
+      `- Tool: ${result.toolName}`,
+      "- Connected: no",
+      `- Error: ${result.error ?? "No structured result was returned."}`,
+      "- Treat this scheduler context as unavailable.",
+    ].join("\n");
+  }
+
+  const structured = result.structuredContent;
+  const task = structured.task;
+  const aggregate = structured.latestAggregate;
+  const latestRun = structured.runs[structured.runs.length - 1];
+
+  return [
+    "Day 18 scheduler MCP tool result:",
+    `- Tool: ${result.toolName}`,
+    "- Connected: yes",
+    `- Requested action: ${result.requestedAction}`,
+    `- Scheduler enabled: ${structured.schedulerEnabled ? "yes" : "no"}`,
+    `- Worker active: ${result.runtime.workerActive ? "yes" : "no"}`,
+    `- Task: ${task.title} (${task.serverId}/${task.toolName})`,
+    `- Task enabled: ${task.enabled ? "yes" : "no"}`,
+    `- Schedule: ${task.schedule.mode}, interval ${task.schedule.intervalSeconds}s, daily ${task.schedule.dailyTime}`,
+    `- Next run: ${formatDay18NextRun(structured)}`,
+    `- File source: ${structured.source.path}`,
+    `- Parser preset: ${structured.source.parserPreset}`,
+    `- Data root: ${structured.dataRoot}`,
+    `- Cache: ${structured.storagePaths.messagesCache}`,
+    `- Aggregate file: ${structured.storagePaths.latestAggregate}`,
+    aggregate
+      ? `- Aggregate summary: ${aggregate.summary}`
+      : "- Aggregate summary: no run has completed yet",
+    aggregate
+      ? `- Relevant/new/priority/day messages: ${aggregate.totalRelevantMessages}/${aggregate.newRelevantMessages}/${aggregate.priorityAuthorMessages}/${aggregate.assignmentMessages}`
+      : "- Relevant/new/priority/day messages: n/a",
+    latestRun
+      ? `- Latest activity: ${latestRun.status}; ${formatDay18RunOutputSummary(latestRun)}`
+      : "- Latest activity: none",
+    "The MCP tool provides scheduled file-derived data. The assistant remains responsible for interpreting and explaining the aggregate.",
+  ].join("\n");
+}
+
+function formatDay18LocalTime(value: string | null) {
+  if (!value) {
+    return "n/a";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return `${new Intl.DateTimeFormat(undefined, {
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+    year: "numeric",
+  }).format(date)} local`;
+}
+
+function formatDay18NextRun(
+  structured: NonNullable<Day18SchedulerToolCallResult["structuredContent"]>,
+) {
+  const task = structured.task;
+  if (task.schedule.mode === "manual") {
+    return "manual only";
+  }
+  if (!structured.schedulerEnabled) {
+    return "paused - scheduler is off";
+  }
+  if (!task.enabled) {
+    return "paused - task is off";
+  }
+  return formatDay18LocalTime(task.nextRunAt);
+}
+
+function formatDay18RunOutputSummary(
+  run: NonNullable<
+    Day18SchedulerToolCallResult["structuredContent"]
+  >["runs"][number],
+) {
+  const raw = run.outputSummary || run.error || "no details";
+  return raw.replace(
+    "0 new relevant message(s) found in this run.",
+    "No new relevant messages since the previous scan.",
+  );
+}
+
+function formatDay18SchedulerEventDetail(result: Day18SchedulerToolCallResult) {
+  if (!result.connected || !result.structuredContent) {
+    return `Day 18 scheduler MCP tool call failed: ${
+      result.error ?? "No structured result was returned."
+    }`;
+  }
+
+  const structured = result.structuredContent;
+  const task = structured.task;
+  const aggregate = structured.latestAggregate;
+  return `Day 18 scheduler MCP tool called ${result.toolName}; action ${result.requestedAction}; scheduler=${structured.schedulerEnabled ? "enabled" : "disabled"}; task=${task.serverId}/${task.toolName}; relevant=${aggregate?.totalRelevantMessages ?? 0}; worker=${result.runtime.workerActive ? "active" : "idle"}.`;
+}
+
+function formatDay18DeltaText(
+  aggregate: NonNullable<
+    Day18SchedulerToolCallResult["structuredContent"]
+  >["latestAggregate"],
+) {
+  if (!aggregate) {
+    return "No scan has completed yet.";
+  }
+  if (aggregate.newRelevantMessages > 0) {
+    return `${aggregate.newRelevantMessages} new relevant message(s) were added in the latest run.`;
+  }
+  return `No new relevant messages since the previous scan; ${aggregate.totalRelevantMessages} cached message(s) are still available.`;
+}
+
+function formatDay18SchedulerAnswer(result: Day18SchedulerToolCallResult) {
+  if (!result.connected || !result.structuredContent) {
+    return [
+      "I could not call the Day 18 scheduler MCP tool.",
+      result.error ? `Error: ${result.error}` : "No structured result was returned.",
+    ].join("\n");
+  }
+
+  const structured = result.structuredContent;
+  const task = structured.task;
+  const aggregate = structured.latestAggregate;
+  const latest = aggregate?.recentMessages[0] ?? null;
+  const latestRun = structured.runs[structured.runs.length - 1] ?? null;
+  const actionLine =
+    result.requestedAction === "start"
+      ? "Scheduler worker started. It will run enabled due tasks while the app process is alive."
+      : result.requestedAction === "stop"
+        ? "Scheduler worker stopped. Stored cache and aggregates are still available."
+        : result.requestedAction === "tick"
+          ? "Manual MCP run completed."
+          : result.requestedAction === "reset"
+            ? "Scheduler storage was reset."
+            : result.requestedAction === "save_settings"
+              ? "Scheduler settings were saved."
+              : "Scheduler status read.";
+
+  return [
+    actionLine,
+    `Tool: \`${result.toolName}\`, connected: ${result.connected ? "yes" : "no"}.`,
+    `Scheduler: ${structured.schedulerEnabled ? "enabled" : "disabled"}; worker: ${result.runtime.workerActive ? "active" : "idle"}.`,
+    `Task: ${task.title}; target: \`${task.serverId}/${task.toolName}\`; task enabled: ${task.enabled ? "yes" : "no"}.`,
+    `Frequency: ${task.schedule.mode}; interval ${task.schedule.intervalSeconds}s; daily time ${task.schedule.dailyTime}; next run ${formatDay18NextRun(structured)}.`,
+    `File source: \`${structured.source.path}\`.`,
+    `Data root: \`${structured.dataRoot}\`.`,
+    `JSON storage: cache \`${structured.storagePaths.messagesCache}\`, aggregate \`${structured.storagePaths.latestAggregate}\`.`,
+    `Aggregate: ${aggregate?.summary ?? "No aggregate yet. Run the task once to build it."}`,
+    aggregate
+      ? `Relevant messages: ${aggregate.totalRelevantMessages} cached. ${formatDay18DeltaText(aggregate)} Priority-author messages: ${aggregate.priorityAuthorMessages}; day marker messages: ${aggregate.assignmentMessages}.`
+      : "Relevant messages: none cached yet.",
+    latest
+      ? `Latest cached message: ${latest.date || "unknown date"}, ${latest.author || "unknown author"}: ${latest.excerpt}`
+      : "Latest cached message: none yet.",
+    latestRun
+      ? `Latest activity: ${latestRun.status}; ${formatDay18RunOutputSummary(latestRun)}.`
+      : "Latest activity: none yet.",
+    "The MCP tool only provides scheduled file-derived data; the assistant is doing this interpretation layer.",
+  ].join("\n");
 }
 
 function formatGitMcpContext(result: GitMcpToolCallResult) {
@@ -3978,6 +4222,139 @@ export async function POST(request: Request) {
       activeTaskRun && activeTaskRun.context.state !== "done"
         ? activeTaskRun
         : createInitialTaskRun(prompt);
+    const day18SchedulerIntent = classifyDay18SchedulerPrompt(prompt);
+    if (
+      day18SchedulerIntent.anySchedulerSignal &&
+      !day18SchedulerIntent.implementationIntent
+    ) {
+      const startedAt = performance.now();
+      const schedulerMcpResult = await callDay18SchedulerTool({
+        action: day18SchedulerIntent.action,
+        intervalSeconds: day18SchedulerIntent.intervalSeconds,
+        note: `chat action ${day18SchedulerIntent.action}`,
+      });
+      const schedulerMcpContext =
+        formatDay18SchedulerContext(schedulerMcpResult);
+      const assistantAnswer = formatDay18SchedulerAnswer(schedulerMcpResult);
+      const structured: AssistantStructuredResult = {
+        answer: assistantAnswer,
+        branch: {
+          action: "keep",
+          title: null,
+          summary: null,
+          reason:
+            "Day 18 scheduler MCP request answered from tool data.",
+        },
+        memoryUpdates: [],
+        confirmationQuestion: null,
+      };
+      const userMessage: ChatMessage = {
+        role: "user",
+        content: prompt,
+        profileId: activeProfile.id,
+      };
+      const assistantMessage: ChatMessage = {
+        role: "assistant",
+        content: assistantAnswer,
+        profileId: activeProfile.id,
+      };
+      const branchUpdate = updateBranch({
+        dialog: active,
+        selectedBranch: selected.branch,
+        structured,
+        userMessage,
+        assistantMessage,
+        needsSummary,
+        activeProfileId: activeProfile.id,
+      });
+      const contextTokens = estimateTextTokens(schedulerMcpContext).estimatedTokens;
+      const requestTokens = estimateTextTokens(prompt).estimatedTokens;
+      const responseTokens = estimateTextTokens(assistantAnswer).estimatedTokens;
+      const totalTokens = contextTokens + requestTokens + responseTokens;
+      const metricRow: TokenMetricRow = {
+        id: makeMemoryLayerId("memory-metric"),
+        turn: active.metrics.length + 1,
+        status: "sent",
+        requestTokens,
+        contextTokens,
+        responseTokens,
+        totalTokens,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        providerCost: null,
+        note: `Day 18 scheduler MCP ${day18SchedulerIntent.action} answer for branch "${selected.branch.title}".`,
+      };
+      const nextMetrics = [...active.metrics, metricRow];
+      const shortTermEvents: MemoryLayerEvent[] = [
+        {
+          layer: "shortTerm",
+          action: "saved",
+          detail:
+            "Day 18 scheduler user request and MCP answer were stored in the selected topic branch.",
+          filePath: state.filePaths.shortTerm,
+        },
+        {
+          layer: "shortTerm",
+          action: "selected_branch",
+          detail: `${selected.branch.title}: ${selected.reason}`,
+          filePath: state.filePaths.shortTerm,
+        },
+        {
+          layer: "shortTerm",
+          action: "prompt_context",
+          detail:
+            "Day 18 scheduler MCP result was used directly. Existing lifecycle task state and task-local invariants were preserved but not applied.",
+          filePath: state.filePaths.shortTerm,
+        },
+        {
+          layer: "shortTerm",
+          action: "prompt_context",
+          detail: formatDay18SchedulerEventDetail(schedulerMcpResult),
+          filePath: state.filePaths.shortTerm,
+        },
+        {
+          layer: "longTerm",
+          action: "skipped",
+          detail:
+            "Profile extraction skipped for a Day 18 scheduler MCP request.",
+          filePath: state.filePaths.userProfiles,
+        },
+        ...branchUpdate.events.map((event) => ({
+          ...event,
+          filePath: event.filePath || state.filePaths.shortTerm,
+        })),
+      ];
+      const nextState = withUpdatedActiveMemoryDialog(
+        addGlobalMetricRow(state, metricRow),
+        (dialog) => ({
+          ...dialog,
+          activeBranchId: branchUpdate.activeBranchId,
+          branches: branchUpdate.branches,
+          messages: branchUpdate.messages,
+          metrics: nextMetrics,
+          compactMetricsSummary: summarizeMetrics(nextMetrics),
+          pendingConfirmation: null,
+          taskRun: active.taskRun,
+        }),
+      );
+      await writeMemoryLayersState(nextState);
+
+      return NextResponse.json({
+        ...nextState,
+        events: shortTermEvents,
+        recentMessageCount: recentMessages.length,
+        result: {
+          answer: assistantAnswer,
+          model: "day18-scheduler-mcp",
+          elapsedMs: metricRow.elapsedMs,
+          usage: {
+            promptTokens: null,
+            completionTokens: null,
+            totalTokens: null,
+            providerCost: null,
+          },
+        },
+      });
+    }
     const isReadOnlyStatusRequest = isReadOnlyProjectStatusPrompt(prompt);
     if (isReadOnlyStatusRequest) {
       const startedAt = performance.now();

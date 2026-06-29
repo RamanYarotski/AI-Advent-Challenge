@@ -372,6 +372,148 @@ type GitMcpToolState = {
   checkedAt: string;
 };
 
+type SchedulerMcpAction =
+  | "status"
+  | "save_settings"
+  | "start"
+  | "stop"
+  | "tick"
+  | "reset";
+
+type SchedulerMcpScheduleMode = "manual" | "interval" | "daily";
+
+type SchedulerMcpFileSource = {
+  sourceType: "file";
+  parserPreset: string;
+  path: string;
+};
+
+type SchedulerMcpBriefingProfile = {
+  targetDays: number[];
+  priorityAuthors: string[];
+  keywords: string[];
+  replyDepth: number;
+  instructions: string;
+};
+
+type SchedulerMcpBriefingMessage = {
+  id: string;
+  date: string;
+  author: string;
+  replyToMessageId: string | null;
+  text: string;
+  excerpt: string;
+};
+
+type SchedulerMcpBriefingAggregate = {
+  sourceType: string;
+  sourcePath: string;
+  parserPreset: string;
+  targetDays: number[];
+  priorityAuthors: string[];
+  instructions: string;
+  totalRelevantMessages: number;
+  newRelevantMessages: number;
+  assignmentMessages: number;
+  priorityAuthorMessages: number;
+  latestMessageId: number | null;
+  latestMessageDate: string | null;
+  summary: string;
+  recentMessages: SchedulerMcpBriefingMessage[];
+  updatedAt: string;
+};
+
+type SchedulerMcpTask = {
+  id: string;
+  title: string;
+  enabled: boolean;
+  serverId: string;
+  toolName: string;
+  args: {
+    source: SchedulerMcpFileSource;
+    briefingProfile: SchedulerMcpBriefingProfile;
+  };
+  schedule: {
+    mode: SchedulerMcpScheduleMode;
+    intervalSeconds: number;
+    dailyTime: string;
+  };
+  lastRunAt: string | null;
+  nextRunAt: string | null;
+  runCount: number;
+  lastResult: SchedulerMcpBriefingAggregate | null;
+  lastError: string | null;
+  updatedAt: string;
+};
+
+type SchedulerMcpRun = {
+  id: string;
+  taskId: string;
+  title: string;
+  serverId: string;
+  toolName: string;
+  status: "running" | "success" | "failed" | "skipped";
+  inputSummary: string;
+  outputSummary: string;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  savedPaths: string[];
+  error: string | null;
+  note: string;
+};
+
+type SchedulerMcpStructuredContent = {
+  schedulerEnabled: boolean;
+  dataRoot: string;
+  source: SchedulerMcpFileSource;
+  briefingProfile: SchedulerMcpBriefingProfile;
+  task: SchedulerMcpTask;
+  tasks: SchedulerMcpTask[];
+  runs: SchedulerMcpRun[];
+  latestAggregate: SchedulerMcpBriefingAggregate | null;
+  storagePaths: {
+    index: string;
+    tasks: string;
+    runs: string;
+    messagesCache: string;
+    latestAggregate: string;
+    digests: string;
+    reports: string;
+  };
+  message: string;
+  checkedAt: string;
+};
+
+type SchedulerMcpToolState = {
+  connected: boolean;
+  serverName: string;
+  serverVersion: string | null;
+  transport: "stdio";
+  toolName:
+    | "get_scheduler_status"
+    | "upsert_scheduled_task"
+    | "toggle_scheduled_task"
+    | "run_scheduled_task"
+    | "reset_scheduler";
+  requestedAction: SchedulerMcpAction;
+  arguments: {
+    action: SchedulerMcpAction;
+  } & Record<string, unknown>;
+  tools: McpDiscoveredTool[];
+  structuredContent: SchedulerMcpStructuredContent | null;
+  contentText: string | null;
+  runtime: {
+    workerActive: boolean;
+    workerPid: number | null;
+    startedAt: string | null;
+    lastWorkerError: string | null;
+  };
+  error: string | null;
+  stderr: string | null;
+  checkedAt: string;
+};
+
 type ModelOption = {
   value: string;
   label: string;
@@ -690,6 +832,37 @@ async function loadGitMcpTool() {
   return payload as GitMcpToolState;
 }
 
+type SchedulerMcpRequest = {
+  action?: SchedulerMcpAction;
+  dataRoot?: string;
+  sourcePath?: string;
+  targetDays?: number[];
+  priorityAuthors?: string[];
+  keywords?: string[];
+  replyDepth?: number;
+  instructions?: string;
+  schedulerEnabled?: boolean;
+  taskEnabled?: boolean;
+  scheduleMode?: SchedulerMcpScheduleMode;
+  intervalSeconds?: number;
+  dailyTime?: string;
+  note?: string;
+};
+
+async function loadSchedulerMcpTool(input: SchedulerMcpRequest = {}) {
+  const response = await fetch("/api/agent/mcp-day18", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(input),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Failed to call Day 18 scheduler MCP tool.");
+  }
+  return payload as SchedulerMcpToolState;
+}
+
 async function runMemoryLayersAction(input: {
   action:
     | "create_dialog"
@@ -822,6 +995,9 @@ export default function Home() {
   const [mcpToolsLoading, setMcpToolsLoading] = useState(false);
   const [gitMcpState, setGitMcpState] = useState<GitMcpToolState | null>(null);
   const [gitMcpLoading, setGitMcpLoading] = useState(false);
+  const [schedulerMcpState, setSchedulerMcpState] =
+    useState<SchedulerMcpToolState | null>(null);
+  const [schedulerMcpLoading, setSchedulerMcpLoading] = useState(false);
   const [recentMessages, setRecentMessages] = useState("4");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -966,6 +1142,125 @@ export default function Home() {
     };
   }, [activeDay]);
 
+  useEffect(() => {
+    if (activeDay !== "day11" && activeDay !== "day12") {
+      return;
+    }
+
+    let cancelled = false;
+    loadSchedulerMcpTool({ action: "status" })
+      .then((state) => {
+        if (!cancelled) {
+          setSchedulerMcpState(state);
+        }
+      })
+      .catch((statusError) => {
+        if (!cancelled) {
+          setSchedulerMcpState({
+            connected: false,
+            serverName: "ai-advent-day18-scheduler",
+            serverVersion: null,
+            transport: "stdio",
+            toolName: "get_scheduler_status",
+            requestedAction: "status",
+            arguments: {
+              action: "status",
+            },
+            tools: [],
+            structuredContent: null,
+            contentText: null,
+            runtime: {
+              workerActive: false,
+              workerPid: null,
+              startedAt: null,
+              lastWorkerError:
+                statusError instanceof Error
+                  ? statusError.message
+                  : "Unexpected Day 18 scheduler MCP error.",
+            },
+            error:
+              statusError instanceof Error
+                ? statusError.message
+                : "Unexpected Day 18 scheduler MCP error.",
+            stderr: null,
+            checkedAt: new Date().toISOString(),
+          });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDay]);
+
+  const schedulerPollingEnabled = Boolean(
+    schedulerMcpState?.structuredContent?.schedulerEnabled ||
+      schedulerMcpState?.runtime.workerActive,
+  );
+  const schedulerPollingIntervalMs = Math.max(
+    3000,
+    Math.min(
+      15000,
+      Math.floor(
+        ((schedulerMcpState?.structuredContent?.task.schedule.intervalSeconds ??
+          10) *
+          1000) /
+          2,
+      ),
+    ),
+  );
+  const schedulerPollingDataRoot = schedulerMcpState?.structuredContent?.dataRoot;
+
+  useEffect(() => {
+    if (!schedulerPollingEnabled) {
+      return;
+    }
+
+    let cancelled = false;
+    const intervalId = window.setInterval(() => {
+      loadSchedulerMcpTool({
+        action: "status",
+        dataRoot: schedulerPollingDataRoot,
+      })
+        .then((state) => {
+          if (!cancelled) {
+            setSchedulerMcpState(state);
+          }
+        })
+        .catch((pollError) => {
+          if (cancelled) {
+            return;
+          }
+          const message =
+            pollError instanceof Error
+              ? pollError.message
+              : "Unexpected Day 18 scheduler MCP polling error.";
+          setSchedulerMcpState((current) =>
+            current
+              ? {
+                  ...current,
+                  error: message,
+                  runtime: {
+                    ...current.runtime,
+                    lastWorkerError: message,
+                  },
+                  checkedAt: new Date().toISOString(),
+                }
+              : current,
+          );
+        });
+    }, schedulerPollingIntervalMs);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [
+    schedulerPollingDataRoot,
+    schedulerPollingEnabled,
+    schedulerPollingIntervalMs,
+  ]);
+
   const activeTokenDialog = useMemo(() => {
     if (!tokenLab) {
       return null;
@@ -1069,6 +1364,62 @@ export default function Home() {
       });
     } finally {
       setGitMcpLoading(false);
+    }
+  }
+
+  async function refreshSchedulerMcpTool(
+    action: SchedulerMcpAction = "status",
+    overrides: Partial<SchedulerMcpRequest> = {},
+  ) {
+    setSchedulerMcpLoading(true);
+    setError("");
+    try {
+      const nextState = await loadSchedulerMcpTool({
+        action,
+        note: action === "tick" ? "manual UI run" : "",
+        ...overrides,
+      });
+      setSchedulerMcpState(nextState);
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error
+          ? requestError.message
+          : "Unexpected Day 18 scheduler MCP error.";
+      setError(message);
+      setSchedulerMcpState({
+        connected: false,
+        serverName: "ai-advent-day18-scheduler",
+        serverVersion: null,
+        transport: "stdio",
+        toolName:
+          action === "save_settings"
+            ? "upsert_scheduled_task"
+            : action === "tick"
+              ? "run_scheduled_task"
+              : action === "reset"
+                ? "reset_scheduler"
+                : action === "start" || action === "stop"
+                  ? "toggle_scheduled_task"
+                  : "get_scheduler_status",
+        requestedAction: action,
+        arguments: {
+          action,
+        },
+        tools: [],
+        structuredContent: null,
+        contentText: null,
+        runtime: {
+          workerActive: false,
+          workerPid: null,
+          startedAt: null,
+          lastWorkerError: message,
+        },
+        error: message,
+        stderr: null,
+        checkedAt: new Date().toISOString(),
+      });
+    } finally {
+      setSchedulerMcpLoading(false);
     }
   }
 
@@ -1826,6 +2177,8 @@ Solve the task as a group of experts:
               mcpToolsLoading={mcpToolsLoading}
               mcpToolsState={mcpToolsState}
               model={model}
+              schedulerMcpLoading={schedulerMcpLoading}
+              schedulerMcpState={schedulerMcpState}
               onCreate={createMemoryLayersDialog}
               onDelete={deleteMemoryLayersDialog}
               onInvariantCreate={createInvariant}
@@ -1838,6 +2191,7 @@ Solve the task as a group of experts:
               onMemoryFolderMove={moveMemoryFolder}
               onGitMcpRun={refreshGitMcpTool}
               onMcpToolsRefresh={refreshMcpTools}
+              onSchedulerMcpRun={refreshSchedulerMcpTool}
               onProfileApplySuggestion={applyProfileUpdate}
               onProfileApplySuggestions={applyAllProfileUpdates}
               onProfileCreate={createUserProfile}
@@ -2085,8 +2439,244 @@ function MemoryFileSettingsForm({
   );
 }
 
+function SchedulerSettingsPage({
+  loading,
+  onRun,
+  state,
+}: {
+  loading: boolean;
+  onRun: (
+    action?: SchedulerMcpAction,
+    overrides?: Partial<SchedulerMcpRequest>,
+  ) => void;
+  state: SchedulerMcpToolState | null;
+}) {
+  const structured = state?.structuredContent;
+  const actualSchedulerEnabled = structured?.schedulerEnabled ?? false;
+  const [dataRoot, setDataRoot] = useState(structured?.dataRoot ?? ".data/mcp-workflows");
+  const [sourcePath, setSourcePath] = useState(structured?.source.path ?? "");
+  const [targetDays, setTargetDays] = useState(
+    structured?.briefingProfile.targetDays.join(", ") ?? "18, 19, 20",
+  );
+  const [priorityAuthors, setPriorityAuthors] = useState(
+    structured?.briefingProfile.priorityAuthors.join(", ") ??
+      "Алексей Гладков, Mobile Developer Manager",
+  );
+  const [keywords, setKeywords] = useState(
+    structured?.briefingProfile.keywords.join(", ") ??
+      "mcp, scheduler, pipeline, orchestration",
+  );
+  const [replyDepth, setReplyDepth] = useState(
+    String(structured?.briefingProfile.replyDepth ?? 1),
+  );
+  const [instructions, setInstructions] = useState(
+    structured?.briefingProfile.instructions ??
+      "Prioritize assignment posts and answers from priority authors. Keep clarifications from reply chains. Ignore obvious off-topic messages.",
+  );
+  const [schedulerEnabled, setSchedulerEnabled] = useState(
+    structured?.schedulerEnabled ?? false,
+  );
+  const [taskEnabled, setTaskEnabled] = useState(
+    structured?.task.enabled ?? true,
+  );
+  const [scheduleMode, setScheduleMode] = useState<SchedulerMcpScheduleMode>(
+    structured?.task.schedule.mode ?? "manual",
+  );
+  const [intervalPreset, setIntervalPreset] = useState(
+    String(structured?.task.schedule.intervalSeconds ?? 60),
+  );
+  const [dailyTime, setDailyTime] = useState(
+    structured?.task.schedule.dailyTime ?? "09:00",
+  );
+
+  function splitList(value: string) {
+    return value
+      .split(/[,;\n]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function numericList(value: string) {
+    return splitList(value)
+      .map((item) => Number.parseInt(item, 10))
+      .filter((item) => Number.isFinite(item));
+  }
+
+  function settingsPayload(): Partial<SchedulerMcpRequest> {
+    return {
+      dataRoot,
+      sourcePath,
+      targetDays: numericList(targetDays),
+      priorityAuthors: splitList(priorityAuthors),
+      keywords: splitList(keywords),
+      replyDepth: Number.parseInt(replyDepth, 10) || 0,
+      instructions,
+      schedulerEnabled,
+      taskEnabled,
+      scheduleMode,
+      intervalSeconds: Number.parseInt(intervalPreset, 10) || 60,
+      dailyTime,
+    };
+  }
+
+  return (
+    <section className="settings-page">
+      <div className="settings-page-head">
+        <h3>Scheduler</h3>
+        <p>Configure a generic MCP task that scans a local message export file.</p>
+      </div>
+      <div className="scheduler-settings-grid">
+        <label className="toggle-row">
+          <input
+            checked={schedulerEnabled}
+            onChange={(event) => setSchedulerEnabled(event.target.checked)}
+            type="checkbox"
+          />
+          Scheduler enabled
+        </label>
+        <label className="toggle-row">
+          <input
+            checked={taskEnabled}
+            onChange={(event) => setTaskEnabled(event.target.checked)}
+            type="checkbox"
+          />
+          Briefing task enabled
+        </label>
+        <label>
+          Data root
+          <input
+            onChange={(event) => setDataRoot(event.target.value)}
+            value={dataRoot}
+          />
+        </label>
+        <label>
+          File source path
+          <input
+            onChange={(event) => setSourcePath(event.target.value)}
+            value={sourcePath}
+          />
+        </label>
+        <label>
+          Target days
+          <input
+            onChange={(event) => setTargetDays(event.target.value)}
+            value={targetDays}
+          />
+        </label>
+        <label>
+          Priority authors
+          <input
+            onChange={(event) => setPriorityAuthors(event.target.value)}
+            value={priorityAuthors}
+          />
+        </label>
+        <label>
+          Keywords
+          <input
+            onChange={(event) => setKeywords(event.target.value)}
+            value={keywords}
+          />
+        </label>
+        <label>
+          Reply depth
+          <input
+            inputMode="numeric"
+            onChange={(event) => setReplyDepth(event.target.value)}
+            value={replyDepth}
+          />
+        </label>
+        <label>
+          Frequency
+          <select
+            onChange={(event) => {
+              const value = event.target.value;
+              if (value === "manual" || value === "daily") {
+                setScheduleMode(value);
+              } else {
+                setScheduleMode("interval");
+                setIntervalPreset(value);
+              }
+            }}
+            value={scheduleMode === "interval" ? intervalPreset : scheduleMode}
+          >
+            <option value="manual">Manual</option>
+            <option value="10">Every 10 sec demo</option>
+            <option value="60">Every 1 min</option>
+            <option value="300">Every 5 min</option>
+            <option value="900">Every 15 min</option>
+            <option value="1800">Every 30 min</option>
+            <option value="3600">Every 60 min</option>
+            <option value="daily">Daily at time</option>
+          </select>
+        </label>
+        <label>
+          Daily time
+          <input
+            onChange={(event) => setDailyTime(event.target.value)}
+            type="time"
+            value={dailyTime}
+          />
+        </label>
+        <label className="settings-wide">
+          Instructions
+          <textarea
+            onChange={(event) => setInstructions(event.target.value)}
+            rows={4}
+            value={instructions}
+          />
+        </label>
+      </div>
+      <div className="settings-actions-row">
+        <button
+          className="run"
+          disabled={loading}
+          onClick={() => onRun("save_settings", settingsPayload())}
+          type="button"
+        >
+          Save settings
+        </button>
+        <button
+          className="secondary-action"
+          disabled={loading}
+          onClick={() => onRun("tick", settingsPayload())}
+          type="button"
+        >
+          Run now
+        </button>
+        <button
+          className="secondary-action"
+          disabled={loading}
+          onClick={() =>
+            onRun(actualSchedulerEnabled ? "stop" : "start", settingsPayload())
+          }
+          type="button"
+        >
+          {actualSchedulerEnabled ? "Stop worker" : "Start worker"}
+        </button>
+        <button
+          className="secondary-action"
+          disabled={loading}
+          onClick={() => onRun("status", { dataRoot })}
+          type="button"
+        >
+          Refresh status
+        </button>
+      </div>
+      {structured && (
+        <div className="memory-path-list">
+          <span>Tasks: {structured.storagePaths.tasks}</span>
+          <span>Runs: {structured.storagePaths.runs}</span>
+          <span>Cache: {structured.storagePaths.messagesCache}</span>
+          <span>Aggregate: {structured.storagePaths.latestAggregate}</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
 type SettingsSection =
   | "profile"
+  | "scheduler"
   | "invariants"
   | "location"
   | "memory"
@@ -2116,6 +2706,9 @@ function AssistantSettingsModal({
   onProfileRename,
   onProfileSelect,
   onProfileUpdate,
+  onSchedulerMcpRun,
+  schedulerMcpLoading,
+  schedulerMcpState,
 }: {
   lab: MemoryLayersState;
   loading: boolean;
@@ -2133,11 +2726,18 @@ function AssistantSettingsModal({
   onProfileRename: (profileId: string, name: string) => void;
   onProfileSelect: (profileId: string) => void;
   onProfileUpdate: (profile: Partial<UserProfile> & { id: string }) => void;
+  onSchedulerMcpRun: (
+    action?: SchedulerMcpAction,
+    overrides?: Partial<SchedulerMcpRequest>,
+  ) => void;
+  schedulerMcpLoading: boolean;
+  schedulerMcpState: SchedulerMcpToolState | null;
 }) {
   const [section, setSection] = useState<SettingsSection>("profile");
   const activeProfile = activeProfileFrom(lab);
   const sections: Array<{ id: SettingsSection; label: string }> = [
     { id: "profile", label: "Profile" },
+    { id: "scheduler", label: "Scheduler" },
     { id: "invariants", label: "Invariants" },
     { id: "location", label: "Memory location" },
     { id: "memory", label: "Saved memory" },
@@ -2204,6 +2804,18 @@ function AssistantSettingsModal({
               key={lab.fileSettings.memoryFolder}
               loading={loading}
               onSubmit={onMemoryFolderMove}
+            />
+          )}
+          {section === "scheduler" && (
+            <SchedulerSettingsPage
+              key={
+                schedulerMcpState?.structuredContent?.checkedAt ??
+                schedulerMcpState?.checkedAt ??
+                "scheduler-settings"
+              }
+              loading={schedulerMcpLoading}
+              onRun={onSchedulerMcpRun}
+              state={schedulerMcpState}
             />
           )}
           {section === "invariants" && (
@@ -2929,6 +3541,202 @@ function GitMcpToolPanel({
   );
 }
 
+function formatLocalDateTime(value: string | null) {
+  if (!value) {
+    return "n/a";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return `${new Intl.DateTimeFormat(undefined, {
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+    year: "numeric",
+  }).format(date)} local`;
+}
+
+function formatSchedulerNextRun(
+  structured: SchedulerMcpStructuredContent | undefined,
+) {
+  const task = structured?.task;
+  if (!structured || !task) {
+    return "n/a";
+  }
+  if (task.schedule.mode === "manual") {
+    return "Manual only";
+  }
+  if (!structured.schedulerEnabled) {
+    return "Paused - scheduler is off";
+  }
+  if (!task.enabled) {
+    return "Paused - task is off";
+  }
+  return formatLocalDateTime(task.nextRunAt);
+}
+
+function formatRunDuration(value: number | null) {
+  return value === null ? "n/a" : `${value} ms`;
+}
+
+function formatAggregateDelta(aggregate: SchedulerMcpBriefingAggregate | null) {
+  if (!aggregate) {
+    return "No scan has completed yet.";
+  }
+  if (aggregate.newRelevantMessages > 0) {
+    return `${aggregate.newRelevantMessages} new relevant message(s) added in the latest scan.`;
+  }
+  return `No new relevant messages since the previous scan; ${aggregate.totalRelevantMessages} cached message(s) are still available.`;
+}
+
+function formatSchedulerRunOutput(run: SchedulerMcpRun) {
+  const raw = run.outputSummary || run.error || "no details";
+  return raw.replace(
+    "0 new relevant message(s) found in this run.",
+    "No new relevant messages since the previous scan.",
+  );
+}
+
+function SchedulerMcpToolPanel({
+  loading,
+  onRun,
+  state,
+}: {
+  loading: boolean;
+  onRun: (action?: SchedulerMcpAction) => void;
+  state: SchedulerMcpToolState | null;
+}) {
+  const status = state?.connected ? "Connected" : state ? "Failed" : "Not checked";
+  const structured = state?.structuredContent;
+  const task = structured?.task;
+  const aggregate = structured?.latestAggregate;
+  const runs = structured?.runs.slice(-5).reverse() ?? [];
+
+  return (
+    <section className="mcp-tools-panel">
+      <div className="mcp-tools-head">
+        <div>
+          <span>Day 18 Scheduler MCP</span>
+          <strong>
+            {structured?.schedulerEnabled ? "Enabled" : status}
+          </strong>
+        </div>
+        <div className="mcp-tools-actions">
+          <button
+            className="secondary-action"
+            disabled={loading}
+            onClick={() => onRun("status")}
+            type="button"
+          >
+            Status
+          </button>
+          <button
+            className="secondary-action"
+            disabled={loading}
+            onClick={() => onRun("start")}
+            type="button"
+          >
+            {loading && state?.requestedAction === "start"
+              ? "Starting..."
+              : "Start scheduler"}
+          </button>
+          <button
+            className="secondary-action"
+            disabled={loading}
+            onClick={() => onRun("tick")}
+            type="button"
+          >
+            Run now
+          </button>
+          <button
+            className="secondary-action"
+            disabled={loading}
+            onClick={() => onRun("stop")}
+            type="button"
+          >
+            Stop
+          </button>
+          <button
+            className="secondary-action"
+            disabled={loading}
+            onClick={() => onRun("reset")}
+            type="button"
+          >
+            Reset
+          </button>
+        </div>
+      </div>
+      {state && (
+        <div className="mcp-tools-meta">
+          <span>Server: {state.serverName}</span>
+          <span>Tool: {state.toolName}</span>
+          <span>Transport: {state.transport}</span>
+          {state.serverVersion && <span>Version: {state.serverVersion}</span>}
+          <span>
+            Worker:{" "}
+            {state.runtime.workerActive
+              ? `active${state.runtime.workerPid ? ` (${state.runtime.workerPid})` : ""}`
+              : "idle"}
+          </span>
+          {state.runtime.lastWorkerError && (
+            <span>Worker error: {state.runtime.lastWorkerError}</span>
+          )}
+        </div>
+      )}
+      {state?.error && <p className="mcp-tools-error">{state.error}</p>}
+      {structured && (
+        <ul className="mcp-tools-list">
+          <li>
+            <strong>{task?.title ?? "Briefing file scan"}</strong>
+            <span>{structured.source.path}</span>
+            <small>
+              Schedule: {task?.schedule.mode ?? "manual"}
+              {task?.schedule.mode === "interval"
+                ? ` / ${task.schedule.intervalSeconds}s`
+                : ""}
+            </small>
+            <small>Last run: {formatLocalDateTime(task?.lastRunAt ?? null)}</small>
+            <small>Next run: {formatSchedulerNextRun(structured)}</small>
+          </li>
+          <li>
+            <strong>Latest briefing aggregate</strong>
+            <span>{aggregate?.summary ?? "No aggregate yet."}</span>
+            <small>
+              Delta: {formatAggregateDelta(aggregate ?? null)}
+            </small>
+            <small>Priority author messages: {aggregate?.priorityAuthorMessages ?? 0}</small>
+            <small>Updated: {formatLocalDateTime(aggregate?.updatedAt ?? null)}</small>
+          </li>
+          <li>
+            <strong>Stored JSON</strong>
+            <span>{structured.storagePaths.latestAggregate}</span>
+            <small>Cache: {structured.storagePaths.messagesCache}</small>
+            <small>Run count: {task?.runCount ?? 0}</small>
+          </li>
+          <li>
+            <strong>MCP activity trace</strong>
+            <span className="mcp-tools-preline">
+              {runs.length
+                ? runs
+                    .map((run) =>
+                      `${formatLocalDateTime(run.startedAt)} | ${run.status} | ${run.serverId}/${run.toolName} | ${formatRunDuration(run.durationMs)} | ${formatSchedulerRunOutput(run)}`,
+                    )
+                    .join("\n")
+                : "No scheduler runs yet."}
+            </span>
+          </li>
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function TaskRunPanel({
   invariants,
   taskRun,
@@ -3056,6 +3864,8 @@ function MemoryLayersView({
   mcpToolsLoading,
   mcpToolsState,
   model,
+  schedulerMcpLoading,
+  schedulerMcpState,
   onCreate,
   onDelete,
   onInvariantCreate,
@@ -3068,6 +3878,7 @@ function MemoryLayersView({
   onGitMcpRun,
   onMemoryFolderMove,
   onMcpToolsRefresh,
+  onSchedulerMcpRun,
   onProfileApplySuggestion,
   onProfileApplySuggestions,
   onProfileCreate,
@@ -3089,6 +3900,8 @@ function MemoryLayersView({
   mcpToolsLoading: boolean;
   mcpToolsState: McpToolsState | null;
   model: string;
+  schedulerMcpLoading: boolean;
+  schedulerMcpState: SchedulerMcpToolState | null;
   onCreate: () => void;
   onDelete: (dialog: MemoryDialog) => void;
   onInvariantCreate: (invariant: Partial<TaskInvariant>) => void;
@@ -3101,6 +3914,10 @@ function MemoryLayersView({
   onGitMcpRun: () => void;
   onMemoryFolderMove: (memoryFolder: string) => void;
   onMcpToolsRefresh: () => void;
+  onSchedulerMcpRun: (
+    action?: SchedulerMcpAction,
+    overrides?: Partial<SchedulerMcpRequest>,
+  ) => void;
   onProfileApplySuggestion: (profileUpdateId: string) => void;
   onProfileApplySuggestions: (profileId: string) => void;
   onProfileCreate: (name: string) => void;
@@ -3221,6 +4038,11 @@ function MemoryLayersView({
             onRun={onGitMcpRun}
             state={gitMcpState}
           />
+          <SchedulerMcpToolPanel
+            loading={schedulerMcpLoading}
+            onRun={onSchedulerMcpRun}
+            state={schedulerMcpState}
+          />
           <ConversationHistory messages={activeDialog.messages} />
           <div className="branch-summary">
             <span>Active topic: {activeBranch?.title ?? "Main topic"}</span>
@@ -3308,6 +4130,9 @@ function MemoryLayersView({
           onProfileRename={onProfileRename}
           onProfileSelect={onProfileSelect}
           onProfileUpdate={onProfileUpdate}
+          onSchedulerMcpRun={onSchedulerMcpRun}
+          schedulerMcpLoading={schedulerMcpLoading}
+          schedulerMcpState={schedulerMcpState}
         />
       )}
     </section>

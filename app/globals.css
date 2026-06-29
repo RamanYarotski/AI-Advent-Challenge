@@ -664,6 +664,13 @@ textarea:focus {
   gap: 4px;
 }
 
+.mcp-tools-head .mcp-tools-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .mcp-tools-head span {
   color: var(--muted);
   font-size: 11px;
@@ -725,6 +732,10 @@ textarea:focus {
   line-height: 1.4;
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.mcp-tools-preline {
+  white-space: pre-line;
 }
 
 .mcp-tools-error {
@@ -864,6 +875,57 @@ textarea:focus {
 .compact-settings {
   align-items: stretch;
   grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.scheduler-settings-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.scheduler-settings-grid label {
+  color: #344054;
+  display: grid;
+  font-size: 13px;
+  font-weight: 800;
+  gap: 6px;
+  min-width: 0;
+}
+
+.scheduler-settings-grid input,
+.scheduler-settings-grid select,
+.scheduler-settings-grid textarea {
+  width: 100%;
+}
+
+.scheduler-settings-grid textarea {
+  min-height: 108px;
+  resize: vertical;
+}
+
+.scheduler-settings-grid .toggle-row {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.scheduler-settings-grid .toggle-row input {
+  width: auto;
+}
+
+.scheduler-settings-grid .settings-wide {
+  grid-column: 1 / -1;
+}
+
+.settings-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .memory-folder-display {
@@ -1562,6 +1624,10 @@ td pre {
   }
 
   .memory-file-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .scheduler-settings-grid {
     grid-template-columns: 1fr;
   }
 

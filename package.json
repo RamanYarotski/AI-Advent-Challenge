@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "scheduler:worker": "node mcp/day18-scheduler-worker.mjs",
     "lint": "eslint ."
   },
   "dependencies": {
