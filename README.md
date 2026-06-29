@@ -6,7 +6,7 @@ The project started as small isolated LLM experiments and is now evolving into o
 
 ## Current Stage
 
-The current build is a unified assistant with automatic topic branches, context compression, global metrics, file-backed memory, manageable user profiles, language-agnostic profile-learning suggestions, and lifecycle-only orchestration. Every user turn now runs through a persisted `Planning -> Execution -> Validation -> Done` state machine, with a planning swarm, a structured requirements contract, explicit plan approval before execution, stage-local agent contracts, dialog-scoped user invariants, semantic invariant gates, and transition logs.
+The current build is a unified assistant with automatic topic branches, context compression, global metrics, file-backed memory, manageable user profiles, language-agnostic profile-learning suggestions, and lifecycle-only orchestration. Every user turn now runs through a persisted `Planning -> Execution -> Validation -> Acceptance -> Done` state machine, with a planning swarm, a structured requirements contract, explicit plan approval before execution, user acceptance before completion, stage-local agent contracts, dialog-scoped user invariants, semantic invariant gates, and transition logs.
 
 ## Progress
 

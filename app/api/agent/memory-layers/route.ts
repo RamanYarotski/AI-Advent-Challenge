@@ -181,13 +181,15 @@ const TASK_LIFECYCLE_STATES: TaskState[] = [
   "planning",
   "execution",
   "validation",
+  "acceptance",
   "done",
 ];
 const TASK_STAGE_ORDER: Record<TaskState, number> = {
   planning: 1,
   execution: 2,
   validation: 3,
-  done: 4,
+  acceptance: 4,
+  done: 5,
 };
 const ALLOWED_TASK_TRANSITIONS = new Set([
   "planning->planning",
@@ -195,7 +197,9 @@ const ALLOWED_TASK_TRANSITIONS = new Set([
   "execution->planning",
   "execution->validation",
   "validation->execution",
-  "validation->done",
+  "validation->acceptance",
+  "acceptance->execution",
+  "acceptance->done",
 ]);
 
 function layerLabel(layer: MemoryLayerKey) {
@@ -742,20 +746,21 @@ function structuralContractQuestions(contract: RequirementsContract) {
 function finalizeRequirementsContract(
   contract: RequirementsContract,
 ): RequirementsContract {
+  const structuralQuestions = structuralContractQuestions(contract);
   const openQuestions = uniqueStrings(
-    [...contract.openQuestions, ...structuralContractQuestions(contract)],
+    [...contract.openQuestions, ...structuralQuestions],
     8,
   );
+  const hasRequiredPlanningInputs =
+    Boolean(contract.goal) &&
+    Boolean(contract.targetLocation) &&
+    contract.requirements.length > 0 &&
+    contract.acceptanceCriteria.length > 0;
+
   return {
     ...contract,
     openQuestions,
-    readyForApproval:
-      contract.readyForApproval &&
-      openQuestions.length === 0 &&
-      Boolean(contract.goal) &&
-      Boolean(contract.targetLocation) &&
-      contract.requirements.length > 0 &&
-      contract.acceptanceCriteria.length > 0,
+    readyForApproval: hasRequiredPlanningInputs && structuralQuestions.length === 0,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -917,7 +922,17 @@ function buildStageLocalContext(input: {
       formatRequirementsContract(context.requirementsContract),
       formatStageList("Approved plan", context.plan),
       `Execution draft:\n${input.executionDraft || "- empty"}`,
-      "Done internals are not available to this stage.",
+      "Acceptance and Done internals are not available to this stage.",
+    ].join("\n");
+  }
+
+  if (input.stage === "acceptance") {
+    return [
+      ...base,
+      formatRequirementsContract(context.requirementsContract),
+      `Passed validation: ${input.validationResult?.reason || "- empty"}`,
+      `Review draft:\n${input.executionDraft || "- empty"}`,
+      "Waiting for explicit user acceptance. Any bug report or requested change must return to Execution.",
     ].join("\n");
   }
 
@@ -926,7 +941,7 @@ function buildStageLocalContext(input: {
     formatRequirementsContract(context.requirementsContract),
     `Passed validation: ${input.validationResult?.reason || "- empty"}`,
     `Final draft:\n${input.executionDraft || "- empty"}`,
-    "Planning, Execution, and Validation internals are summarized only through the passed validation result and final draft.",
+    "Planning, Execution, Validation, and Acceptance internals are summarized only through the passed validation result, user acceptance, and final draft.",
   ].join("\n");
 }
 
@@ -1028,6 +1043,17 @@ function isExplicitPlanApproval(prompt: string) {
   );
 }
 
+function isExplicitUserAcceptance(prompt: string) {
+  const normalized = prompt.trim().toLowerCase();
+  if (!normalized || normalized.length > 80) {
+    return false;
+  }
+
+  return /^(approve|approved|accept|accepted|confirmed|looks good|ok|okay|yes|ship it|done|complete|РїСЂРёРЅРёРјР°СЋ|РїСЂРёРЅСЏС‚Рѕ|РїРѕРґС‚РІРµСЂР¶РґР°СЋ|СѓС‚РІРµСЂР¶РґР°СЋ|РѕРґРѕР±СЂСЏСЋ|РґР°|РѕРє|РіРѕС‚РѕРІРѕ|С…РѕСЂРѕС€Рѕ)[\s.!?,;:]*$/iu.test(
+    normalized,
+  );
+}
+
 function buildPlanApprovalQuestion(
   plan: string[],
   requirementsContract: RequirementsContract,
@@ -1041,6 +1067,22 @@ function buildPlanApprovalQuestion(
     plan.length ? plan.map((item, index) => `${index + 1}. ${item}`).join("\n") : "- empty",
     "",
     "Reply with an explicit approval, for example: `approve`, `proceed`, `начинай`, or `подтверждаю`, to start Execution. Add changes instead if the plan is not ready.",
+  ].join("\n");
+}
+
+function buildUserAcceptanceQuestion(
+  executionDraft: string,
+  validationResult: ValidationResult,
+) {
+  return [
+    "Internal validation passed. Please review the result before I mark this task done.",
+    "",
+    `Validation: ${validationResult.reason}`,
+    "",
+    "Result for acceptance:",
+    executionDraft || "- empty",
+    "",
+    "Reply with `accept` or `approved` to finish the task. Send bugs or requested changes instead, and I will return to Execution to fix them.",
   ].join("\n");
 }
 
@@ -1394,6 +1436,9 @@ async function runSemanticInvariantGate(input: {
       content: [
         "You are an internal semantic invariant gate for a lifecycle orchestrator.",
         "Decide whether the proposed stage artifact semantically violates any active invariant.",
+        "Evaluate the artifact and proposed transition only. Lifecycle metadata is context, not a candidate violation by itself.",
+        "Do not fail because historical task text or older paused reasons contained a conflict unless the current artifact still preserves that conflict.",
+        "For Planning artifacts, optional follow-up questions are allowed when the artifact says Ready for approval: yes. Fail only for unresolved required inputs or real invariant conflicts.",
         "Do not rely on keyword matching. Judge meaning, intent, and required behavior.",
         "A blocker invariant violation must make passed=false. Warning violations may be reported without blocking.",
         "Return only valid JSON. Do not wrap the JSON in markdown.",
@@ -1407,8 +1452,8 @@ async function runSemanticInvariantGate(input: {
       content: [
         `Stage: ${input.stage}`,
         `Proposed transition: ${input.proposedTransition}`,
-        `Task: ${input.taskRun.context.task}`,
-        formatRequirementsContract(input.taskRun.context.requirementsContract),
+        `Task run id: ${input.taskRun.context.id}`,
+        `Current lifecycle state: ${input.taskRun.context.state}`,
         "",
         "Active invariants:",
         ...active.map(
@@ -1475,6 +1520,106 @@ function contractWithInvariantConflict(
     ),
     readyForApproval: false,
     updatedAt: new Date().toISOString(),
+  };
+}
+
+function isSemanticGateFailureText(value: string | null | undefined) {
+  return value?.toLowerCase().includes("semantic invariant gate failed") ?? false;
+}
+
+function taskLabelFromContract(contract: RequirementsContract, fallback: string) {
+  return contract.goal.trim() || fallback.trim() || "Untitled task";
+}
+
+function removeSemanticGateFailureQuestions(contract: RequirementsContract) {
+  const openQuestions = contract.openQuestions.filter(
+    (question) => !isSemanticGateFailureText(question),
+  );
+
+  if (openQuestions.length === contract.openQuestions.length) {
+    return contract;
+  }
+
+  return {
+    ...contract,
+    openQuestions,
+    readyForApproval: false,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function prepareTaskRunForPlanningTurn(taskRun: TaskRun, prompt: string): TaskRun {
+  if (taskRun.context.state !== "planning") {
+    return taskRun;
+  }
+
+  const context = taskRun.context;
+  const hadGateFailure =
+    isSemanticGateFailureText(context.current) ||
+    isSemanticGateFailureText(context.pausedReason) ||
+    context.requirementsContract.openQuestions.some(isSemanticGateFailureText);
+  const requirementsContract = hadGateFailure
+    ? removeSemanticGateFailureQuestions(context.requirementsContract)
+    : context.requirementsContract;
+  const task = taskLabelFromContract(requirementsContract, prompt || context.task);
+
+  if (
+    task === context.task &&
+    !hadGateFailure &&
+    requirementsContract === context.requirementsContract
+  ) {
+    return taskRun;
+  }
+
+  return {
+    ...taskRun,
+    context: {
+      ...context,
+      task,
+      current: hadGateFailure
+        ? "User provided new planning input. Rebuild the plan from the current request and requirements."
+        : context.current,
+      pausedReason: hadGateFailure ? null : context.pausedReason,
+      requirementsContract,
+      updatedAt: new Date().toISOString(),
+    },
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function taskRunHasUserAcceptance(taskRun: TaskRun) {
+  return (
+    taskRun.context.done.some((item) =>
+      item.toLowerCase().includes("user accepted the result"),
+    ) ||
+    taskRun.transitions.some(
+      (transition) =>
+        transition.from === "acceptance" &&
+        transition.to === "done" &&
+        transition.allowed,
+    )
+  );
+}
+
+function reviveUnacceptedDoneTask(taskRun: TaskRun): TaskRun {
+  if (taskRun.context.state !== "done" || taskRunHasUserAcceptance(taskRun)) {
+    return taskRun;
+  }
+
+  const now = new Date().toISOString();
+  return {
+    ...taskRun,
+    context: {
+      ...taskRun.context,
+      state: "acceptance" as const,
+      step: TASK_STAGE_ORDER.acceptance,
+      total: TASK_LIFECYCLE_STATES.length,
+      current: "Waiting for user acceptance.",
+      pausedReason:
+        "This task was finalized before user acceptance was required.",
+      updatedAt: now,
+    },
+    updatedAt: now,
   };
 }
 
@@ -1659,7 +1804,9 @@ async function runPlanningSwarm(input: {
   );
   const agentQuestion =
     outputs.find((output) => output.parsed.question)?.parsed.question ?? null;
-  const contractQuestion = requirementsContract.openQuestions.length
+  const contractQuestion =
+    !requirementsContract.readyForApproval &&
+    requirementsContract.openQuestions.length
     ? [
         "I need to stay in Planning before Execution because the requirements contract is incomplete.",
         "",
@@ -1667,10 +1814,8 @@ async function runPlanningSwarm(input: {
         ...requirementsContract.openQuestions.map((question, index) => `${index + 1}. ${question}`),
       ].join("\n")
     : null;
-  const needsUserInput =
-    !requirementsContract.readyForApproval ||
-    outputs.some((output) => output.parsed.needsUserInput);
-  const question = contractQuestion ?? agentQuestion;
+  const needsUserInput = !requirementsContract.readyForApproval;
+  const question = needsUserInput ? contractQuestion ?? agentQuestion : null;
   const planningFindings = uniqueStrings(
     [
       ...findings,
@@ -1702,7 +1847,7 @@ async function runPlanningSwarm(input: {
           "Clarify the task goal and constraints.",
           "Prepare a focused answer or artifact.",
           "Validate the result against active invariants.",
-          "Finalize only after validation passes.",
+          "Request user acceptance before finalizing.",
     ],
     requirementsContract,
     taskInvariants,
@@ -1855,10 +2000,10 @@ async function runDoneAgent(input: {
       role: "system" as const,
       content: [
         "You are the Done Agent, the final lifecycle stage of the unified AI Advent Challenge assistant.",
-        "Finalize only because validation passed.",
+        "Finalize only because internal validation passed and the user explicitly accepted the result.",
         "Use the execution draft as the answer source. Do not invent extra claims.",
-        "You do not change lifecycle state; the orchestrator already approved the validation -> done transition.",
-        "You only know the passed validation result, final draft, and active profile formatting preferences.",
+        "You do not change lifecycle state; the orchestrator already approved the acceptance -> done transition.",
+        "You only know the passed validation result, explicit user acceptance, final draft, and active profile formatting preferences.",
         "Return the existing assistant JSON schema with answer, branch, memoryUpdates, and confirmationQuestion.",
         "",
         "JSON schema:",
@@ -1918,6 +2063,7 @@ async function runDoneAgent(input: {
 function updateTaskContext(input: {
   taskRun: TaskRun;
   state: TaskState;
+  task?: string;
   plan?: string[];
   done?: string[];
   current: string;
@@ -1928,6 +2074,7 @@ function updateTaskContext(input: {
   const now = new Date().toISOString();
   return {
     ...input.taskRun.context,
+    task: input.task?.trim() || input.taskRun.context.task,
     state: input.state,
     step: TASK_STAGE_ORDER[input.state],
     total: TASK_LIFECYCLE_STATES.length,
@@ -2040,7 +2187,7 @@ async function runTaskOrchestration(input: {
   currentProfileSuggestionCount: number;
   shortTermFilePath: string;
 }): Promise<TaskOrchestrationResult> {
-  let taskRun = input.initialTaskRun;
+  let taskRun = prepareTaskRunForPlanningTurn(input.initialTaskRun, input.prompt);
   const events: MemoryLayerEvent[] = [];
   const agentRuns: AgentRun[] = [];
   const swarmRuns: SwarmRun[] = [];
@@ -2143,6 +2290,7 @@ async function runTaskOrchestration(input: {
         context: updateTaskContext({
           taskRun,
           state: "planning",
+          task: taskLabelFromContract(pausedContract, taskRun.context.task),
           plan: invariantConflictReason ? [] : planning.plan,
           done: taskRun.context.done,
           current: pausedQuestion,
@@ -2197,6 +2345,10 @@ async function runTaskOrchestration(input: {
       context: updateTaskContext({
         taskRun,
         state: "planning",
+        task: taskLabelFromContract(
+          planning.requirementsContract,
+          taskRun.context.task,
+        ),
         plan: planning.plan,
         done: [...taskRun.context.done, "Planning completed by swarm"],
         current: approvalQuestion,
@@ -2321,6 +2473,179 @@ async function runTaskOrchestration(input: {
       }),
       updatedAt: new Date().toISOString(),
     };
+  } else if (taskRun.context.state === "acceptance") {
+    if (!isExplicitUserAcceptance(input.prompt)) {
+      const feedbackTransition = makeTransitionDecision(
+        "acceptance",
+        "execution",
+        "User acceptance feedback requires another execution pass.",
+      );
+      transitions.push(feedbackTransition);
+      taskRun = {
+        ...taskRun,
+        transitions: [...taskRun.transitions, feedbackTransition],
+        context: updateTaskContext({
+          taskRun,
+          state: "execution",
+          current: `Address user acceptance feedback: ${input.prompt}`,
+          pausedReason: "User requested changes during acceptance.",
+          awaitingPlanApproval: false,
+        }),
+        updatedAt: new Date().toISOString(),
+      };
+    } else {
+      const latestExecution = latestStageArtifact(taskRun, "execution");
+      if (!latestExecution || !taskRun.validationResult?.passed) {
+        const fallbackTransition = makeTransitionDecision(
+          "acceptance",
+          "execution",
+          "Acceptance could not finalize because the execution draft or passed validation result is missing.",
+        );
+        transitions.push(fallbackTransition);
+        taskRun = {
+          ...taskRun,
+          transitions: [...taskRun.transitions, fallbackTransition],
+          context: updateTaskContext({
+            taskRun,
+            state: "execution",
+            current: "Rebuild the execution draft before the next acceptance attempt.",
+            pausedReason:
+              "Acceptance could not finalize without a passed validation result and execution draft.",
+            awaitingPlanApproval: false,
+          }),
+          updatedAt: new Date().toISOString(),
+        };
+      } else {
+        const acceptedValidationResult = taskRun.validationResult;
+        validationResult = acceptedValidationResult;
+        const doneInvariants = activeInvariantsForStage(
+          availableInvariants,
+          taskInvariantsForRun(taskRun),
+          "done",
+        );
+        const done = await runDoneAgent({
+          prompt: input.prompt,
+          model: input.model,
+          activeProfile: input.activeProfile,
+          taskRun,
+          invariants: doneInvariants,
+          selectedBranch: input.selectedBranch,
+          selectedBranchSummary: input.selectedBranchSummary,
+          recentMessages: input.recentMessages,
+          workingMemory: input.workingMemory,
+          longTermMemory: input.longTermMemory,
+          executionDraft: latestExecution.content,
+          validationResult: acceptedValidationResult,
+          needsSummary: input.needsSummary,
+          currentProfileSuggestionCount: input.currentProfileSuggestionCount,
+        });
+        agentRuns.push(done.run);
+        artifacts.push(makeStageArtifact("done", "Final answer", done.structured.answer));
+        const doneGate = await runSemanticInvariantGate({
+          stage: "done",
+          proposedTransition: "acceptance -> done",
+          artifactTitle: "Final answer",
+          artifactText: done.structured.answer,
+          taskRun,
+          invariants: doneInvariants,
+          model: input.model,
+        });
+
+        if (semanticGateFailed(doneGate)) {
+          const reason = formatSemanticGateReason("done", doneGate);
+          const blockedDoneTransition = makeTransitionDecision(
+            "acceptance",
+            "done",
+            reason,
+            false,
+          );
+          const failedTransition = makeTransitionDecision(
+            "acceptance",
+            "execution",
+            "Done agent produced a final answer that violates active blocker invariants.",
+            true,
+          );
+          transitions.push(blockedDoneTransition);
+          transitions.push(failedTransition);
+          taskRun = {
+            ...taskRun,
+            artifacts: [...taskRun.artifacts, artifacts[artifacts.length - 1]],
+            agentRuns: [...taskRun.agentRuns, done.run],
+            transitions: [...taskRun.transitions, blockedDoneTransition, failedTransition],
+            context: updateTaskContext({
+              taskRun,
+              state: "execution",
+              current: reason,
+              pausedReason: reason,
+              awaitingPlanApproval: false,
+            }),
+            updatedAt: new Date().toISOString(),
+          };
+          events.push(...taskEvents({
+            taskRun,
+            transitions,
+            agentRuns,
+            swarmRuns,
+            validationResult,
+            filePath: input.shortTermFilePath,
+          }));
+          return {
+            structured: buildPausedStructuredAnswer(
+              [
+                "I cannot mark this task done yet because finalization failed.",
+                reason,
+                "I will keep the task in Execution until the issue is fixed.",
+              ].join("\n\n"),
+            ),
+            taskRun,
+            events,
+            agentRuns,
+            swarmRuns,
+            transitions,
+            validationResult,
+          };
+        }
+
+        const acceptanceTransition = makeTransitionDecision(
+          "acceptance",
+          "done",
+          "User explicitly accepted the validated result; finalization is allowed.",
+        );
+        transitions.push(acceptanceTransition);
+        taskRun = {
+          ...taskRun,
+          artifacts: [...taskRun.artifacts, artifacts[artifacts.length - 1]],
+          agentRuns: [...taskRun.agentRuns, done.run],
+          transitions: [...taskRun.transitions, acceptanceTransition],
+          context: updateTaskContext({
+            taskRun,
+            state: "done",
+            done: [...taskRun.context.done, "User accepted the result", "Done agent finalized the response"],
+            current: "Task complete.",
+            awaitingPlanApproval: false,
+          }),
+          updatedAt: new Date().toISOString(),
+        };
+        events.push(...taskEvents({
+          taskRun,
+          transitions,
+          agentRuns,
+          swarmRuns,
+          validationResult,
+          filePath: input.shortTermFilePath,
+        }));
+
+        return {
+          structured: done.structured,
+          taskRun,
+          events,
+          agentRuns,
+          swarmRuns,
+          transitions,
+          validationResult,
+        };
+      }
+    }
   }
 
   if (taskRun.context.state === "execution") {
@@ -2540,7 +2865,7 @@ async function runTaskOrchestration(input: {
   agentRuns.push(validation.run);
   const validationGate = await runSemanticInvariantGate({
     stage: "validation",
-    proposedTransition: "validation -> done",
+    proposedTransition: "validation -> acceptance",
     artifactTitle: "Validation draft review",
     artifactText: [
       "Execution draft:",
@@ -2580,9 +2905,9 @@ async function runTaskOrchestration(input: {
   );
 
   if (!validationParsed.passed) {
-    const blockedDoneTransition = makeTransitionDecision(
+    const blockedAcceptanceTransition = makeTransitionDecision(
       "validation",
-      "done",
+      "acceptance",
       validationResult.reason,
       false,
     );
@@ -2593,13 +2918,13 @@ async function runTaskOrchestration(input: {
         "Validation failed and returned the task to execution.",
       true,
     );
-    transitions.push(blockedDoneTransition);
+    transitions.push(blockedAcceptanceTransition);
     transitions.push(failedTransition);
     taskRun = {
       ...taskRun,
       artifacts: [...taskRun.artifacts, artifacts[artifacts.length - 1]],
       agentRuns: [...taskRun.agentRuns, validation.run],
-      transitions: [...taskRun.transitions, blockedDoneTransition, failedTransition],
+      transitions: [...taskRun.transitions, blockedAcceptanceTransition, failedTransition],
       validationResult,
       context: updateTaskContext({
         taskRun,
@@ -2646,68 +2971,59 @@ async function runTaskOrchestration(input: {
     validationResult,
     context: updateTaskContext({
       taskRun,
-      state: "validation",
+      state: "acceptance",
       done: [...taskRun.context.done, "Validation passed"],
-      current: "Finalize response.",
+      current: "Waiting for user acceptance.",
       awaitingPlanApproval: false,
     }),
     updatedAt: new Date().toISOString(),
   };
-
-  const doneInvariants = activeInvariantsForStage(
+  const acceptanceInvariants = activeInvariantsForStage(
     availableInvariants,
     taskInvariantsForRun(taskRun),
-    "done",
+    "acceptance",
   );
-  const done = await runDoneAgent({
-    prompt: input.prompt,
-    model: input.model,
-    activeProfile: input.activeProfile,
+  const acceptanceArtifact = makeStageArtifact(
+    "acceptance",
+    "Acceptance review draft",
+    execution.parsed.answerDraft,
+  );
+  artifacts.push(acceptanceArtifact);
+  const acceptanceGate = await runSemanticInvariantGate({
+    stage: "acceptance",
+    proposedTransition: "validation -> acceptance",
+    artifactTitle: "Acceptance review draft",
+    artifactText: [
+      "Execution draft:",
+      execution.parsed.answerDraft,
+      "",
+      "Validation result:",
+      validationResult.reason,
+    ].join("\n"),
     taskRun,
-    invariants: doneInvariants,
-    selectedBranch: input.selectedBranch,
-    selectedBranchSummary: input.selectedBranchSummary,
-    recentMessages: input.recentMessages,
-    workingMemory: input.workingMemory,
-    longTermMemory: input.longTermMemory,
-    executionDraft: execution.parsed.answerDraft,
-    validationResult,
-    needsSummary: input.needsSummary,
-    currentProfileSuggestionCount: input.currentProfileSuggestionCount,
-  });
-  agentRuns.push(done.run);
-  artifacts.push(makeStageArtifact("done", "Final answer", done.structured.answer));
-  const doneGate = await runSemanticInvariantGate({
-    stage: "done",
-    proposedTransition: "validation -> done",
-    artifactTitle: "Final answer",
-    artifactText: done.structured.answer,
-    taskRun,
-    invariants: doneInvariants,
+    invariants: acceptanceInvariants,
     model: input.model,
   });
 
-  if (semanticGateFailed(doneGate)) {
-    const reason = formatSemanticGateReason("done", doneGate);
-    const blockedDoneTransition = makeTransitionDecision(
+  if (semanticGateFailed(acceptanceGate)) {
+    const reason = formatSemanticGateReason("acceptance", acceptanceGate);
+    const blockedAcceptanceTransition = makeTransitionDecision(
       "validation",
-      "done",
+      "acceptance",
       reason,
       false,
     );
     const failedTransition = makeTransitionDecision(
       "validation",
       "execution",
-      "Done agent produced a final answer that violates active blocker invariants.",
+      "Acceptance draft violates active blocker invariants.",
       true,
     );
-    transitions.push(blockedDoneTransition);
+    transitions.push(blockedAcceptanceTransition);
     transitions.push(failedTransition);
     taskRun = {
       ...taskRun,
-      artifacts: [...taskRun.artifacts, artifacts[artifacts.length - 1]],
-      agentRuns: [...taskRun.agentRuns, done.run],
-      transitions: [...taskRun.transitions, blockedDoneTransition, failedTransition],
+      transitions: [...taskRun.transitions, blockedAcceptanceTransition, failedTransition],
       context: updateTaskContext({
         taskRun,
         state: "execution",
@@ -2728,7 +3044,7 @@ async function runTaskOrchestration(input: {
     return {
       structured: buildPausedStructuredAnswer(
         [
-          "I cannot mark this task done yet because finalization failed.",
+          "I cannot send this task to user acceptance yet.",
           reason,
           "I will keep the task in Execution until the issue is fixed.",
         ].join("\n\n"),
@@ -2742,22 +3058,20 @@ async function runTaskOrchestration(input: {
     };
   }
 
-  const validationTransition = makeTransitionDecision(
+  const acceptanceTransition = makeTransitionDecision(
     "validation",
-    "done",
-    "Validation and final answer invariant checks passed; finalization is allowed.",
+    "acceptance",
+    "Internal validation passed; user acceptance is required before Done.",
   );
-  transitions.push(validationTransition);
-  taskRun = {
-    ...taskRun,
-    artifacts: [...taskRun.artifacts, artifacts[artifacts.length - 1]],
-    agentRuns: [...taskRun.agentRuns, done.run],
-    transitions: [...taskRun.transitions, validationTransition],
-    context: updateTaskContext({
+  transitions.push(acceptanceTransition);
+    taskRun = {
+      ...taskRun,
+      artifacts: [...taskRun.artifacts, acceptanceArtifact],
+      transitions: [...taskRun.transitions, acceptanceTransition],
+      context: updateTaskContext({
       taskRun,
-      state: "done",
-      done: [...taskRun.context.done, "Done agent finalized the response"],
-      current: "Task complete.",
+      state: "acceptance",
+      current: "Waiting for user acceptance.",
       awaitingPlanApproval: false,
     }),
     updatedAt: new Date().toISOString(),
@@ -2772,7 +3086,9 @@ async function runTaskOrchestration(input: {
   }));
 
   return {
-    structured: done.structured,
+    structured: buildPausedStructuredAnswer(
+      buildUserAcceptanceQuestion(execution.parsed.answerDraft, validationResult),
+    ),
     taskRun,
     events,
     agentRuns,
@@ -3314,9 +3630,12 @@ export async function POST(request: Request) {
     const promptLongTermMemory = filterProfileLikeMemoryNotes(state.longTermMemory);
     const needsSummary = selectedVisible.length >= SUMMARY_TRIGGER_MESSAGES;
     const recentMessages = selectedVisible.slice(-MAX_RECENT_BRANCH_MESSAGES);
+    const activeTaskRun = active.taskRun
+      ? reviveUnacceptedDoneTask(active.taskRun)
+      : null;
     const turnTaskRun =
-      active.taskRun && active.taskRun.context.state !== "done"
-        ? active.taskRun
+      activeTaskRun && activeTaskRun.context.state !== "done"
+        ? activeTaskRun
         : createInitialTaskRun(prompt);
     let extractorError: string | null = null;
     let extractedProfileUpdates: AssistantProfileUpdate[] = [];

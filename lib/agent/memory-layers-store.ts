@@ -52,7 +52,12 @@ export type MemoryLayerEvent = {
   filePath: string;
 };
 
-export type TaskState = "planning" | "execution" | "validation" | "done";
+export type TaskState =
+  | "planning"
+  | "execution"
+  | "validation"
+  | "acceptance"
+  | "done";
 
 export type TaskInvariantScope = "global" | "task" | "stage";
 
@@ -269,7 +274,13 @@ const DEFAULT_FILE_SETTINGS: MemoryFileSettings = {
   invariantsFileName: "task-invariants.json",
 };
 
-const TASK_STATES: TaskState[] = ["planning", "execution", "validation", "done"];
+const TASK_STATES: TaskState[] = [
+  "planning",
+  "execution",
+  "validation",
+  "acceptance",
+  "done",
+];
 
 function makeId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;

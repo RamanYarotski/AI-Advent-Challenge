@@ -5,7 +5,7 @@ Day 13-15 combines the challenge ideas from task state, invariants, swarms, and 
 The assistant still behaves as one product. Users do not pick context strategies, switch to separate day tabs, or bypass orchestration. Internally, every user turn now runs through a persisted lifecycle:
 
 ```text
-Planning -> Execution -> Validation -> Done
+Planning -> Execution -> Validation -> Acceptance -> Done
 ```
 
 ## Task Orchestrator
@@ -22,7 +22,8 @@ The task orchestrator owns the active task run:
 - agent runs;
 - swarm runs;
 - transition decisions;
-- validation result.
+- validation result;
+- user acceptance state.
 
 This state is stored in the existing short-term JSON document store, so a task can pause and continue without being re-explained.
 
@@ -35,9 +36,10 @@ The orchestrator routes work through specialized stage-agent contracts:
 - Planning Agent: extracts requirements and a safe plan.
 - Execution Agent: produces a draft artifact from the current plan.
 - Validation Agent: checks the draft against invariants and stage contracts.
-- Done Agent: finalizes only after validation passes.
+- Acceptance: pauses after internal validation so the user can accept the result or report bugs.
+- Done Agent: finalizes only after explicit user acceptance of a validated result.
 
-Stage agents receive stage-local context instead of the full raw chat history. Planning can inspect selected branch and memory summaries; Execution receives the approved plan and planning summary; Validation receives the execution draft and active invariants; Done receives only the passed validation result and final draft. The orchestrator owns all state transitions.
+Stage agents receive stage-local context instead of the full raw chat history. Planning can inspect selected branch and memory summaries; Execution receives the approved plan and planning summary; Validation receives the execution draft and active invariants; Acceptance exposes the validated draft for user review; Done receives only the passed validation result, explicit user acceptance, and final draft. The orchestrator owns all state transitions.
 
 ## Planning Swarm
 
@@ -62,8 +64,8 @@ Examples:
 
 Each lifecycle stage receives active user invariants plus task-local invariants generated for the current task run. The orchestrator checks each stage artifact with an internal semantic invariant gate after the stage agent responds. The gate judges the artifact against invariant meaning instead of keyword, regex, or technology-specific rules, and blocker invariants fail closed if the gate cannot verify the artifact.
 
-Planning cannot offer an approval-ready plan that violates blockers, Approval re-checks the saved plan before `Planning -> Execution`, Execution cannot send a conflicting draft to Validation, Validation cannot pass a conflicting draft, and Done cannot finalize a conflicting answer. Task-local invariants stay with the task run instead of becoming global Settings rules.
+Planning cannot offer an approval-ready plan that violates blockers, Approval re-checks the saved plan before `Planning -> Execution`, Execution cannot send a conflicting draft to Validation, Validation cannot send a conflicting draft to Acceptance, Acceptance sends user bug reports back to Execution, and Done cannot finalize a conflicting answer. Task-local invariants stay with the task run instead of becoming global Settings rules.
 
 ## Debugging
 
-The main task run panel shows the active lifecycle state, plan, requirements status, active invariant count, swarm activity, and validation result.
+The main task run panel shows the active lifecycle state, plan, requirements status, active invariant count, swarm activity, validation result, and whether the task is waiting for user acceptance.

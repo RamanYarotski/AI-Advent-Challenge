@@ -130,7 +130,20 @@ type MemoryLayerEvent = {
   filePath: string;
 };
 
-type TaskState = "planning" | "execution" | "validation" | "done";
+type TaskState =
+  | "planning"
+  | "execution"
+  | "validation"
+  | "acceptance"
+  | "done";
+
+const TASK_STATES: TaskState[] = [
+  "planning",
+  "execution",
+  "validation",
+  "acceptance",
+  "done",
+];
 
 type TaskInvariant = {
   id: string;
@@ -2355,6 +2368,7 @@ function InvariantsSettingsPage({
     "planning",
     "execution",
     "validation",
+    "acceptance",
     "done",
   ]);
   const visibleInvariants = invariants.filter(
@@ -2459,7 +2473,7 @@ function InvariantsSettingsPage({
         </div>
         <fieldset className="stage-checkboxes">
           <legend>Stages</legend>
-          {(["planning", "execution", "validation", "done"] as TaskState[]).map(
+          {TASK_STATES.map(
             (stage) => (
               <label key={stage}>
                 <input
@@ -2651,13 +2665,13 @@ function TaskRunPanel({
         </div>
       </div>
       <div className="task-state-track" aria-label="Task lifecycle">
-        {(["planning", "execution", "validation", "done"] as TaskState[]).map(
+        {TASK_STATES.map(
           (state) => (
             <span
               className={
                 state === context.state
                   ? "active"
-                  : context.step > ["planning", "execution", "validation", "done"].indexOf(state) + 1
+                  : context.step > TASK_STATES.indexOf(state) + 1
                     ? "complete"
                     : ""
               }
