@@ -22,6 +22,9 @@ export type GitMcpRecentCommit = {
 export type GitMcpRepositoryStatus = {
   repositoryRoot: string;
   branch: string;
+  upstream: string | null;
+  ahead: number | null;
+  behind: number | null;
   isClean: boolean;
   changedFileCount: number;
   changedFiles: GitMcpChangedFile[];
@@ -125,6 +128,15 @@ function normalizeRepositoryStatus(value: unknown): GitMcpRepositoryStatus | nul
     repositoryRoot:
       typeof value.repositoryRoot === "string" ? value.repositoryRoot : "",
     branch: typeof value.branch === "string" ? value.branch : "",
+    upstream: typeof value.upstream === "string" ? value.upstream : null,
+    ahead:
+      typeof value.ahead === "number" && Number.isFinite(value.ahead)
+        ? value.ahead
+        : null,
+    behind:
+      typeof value.behind === "number" && Number.isFinite(value.behind)
+        ? value.behind
+        : null,
     isClean: value.isClean === true,
     changedFileCount:
       typeof value.changedFileCount === "number" &&

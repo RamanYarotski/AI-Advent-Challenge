@@ -250,6 +250,28 @@ function shouldAttachGitMcpContext(prompt: string, taskRun: TaskRun) {
   );
 }
 
+function isReadOnlyProjectStatusPrompt(prompt: string) {
+  const normalized = prompt.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  const implementationIntent = /(?:^|\s)(implement|create|build|add|fix|change|update|refactor|write|code|реализуй|создай|добавь|исправь|поменяй|обнови|напиши|сделай)(?:\s|$)/iu.test(
+    normalized,
+  );
+  const statusSignal = /(?:git|repository|repo|project|status|branch|commit|working tree|changed files|ahead|behind|push|mcp|\u0432\u0435\u0442\u043a|\u0441\u0442\u0430\u0442\u0443\u0441|\u0441\u043e\u0441\u0442\u043e\u044f\u043d|\u043a\u043e\u043c\u043c\u0438\u0442|\u0438\u0437\u043c\u0435\u043d\u0435\u043d|\u043f\u0443\u0448|\u043f\u0440\u043e\u0435\u043a\u0442|\u0440\u0435\u043f\u043e\u0437\u0438\u0442)/iu.test(
+    normalized,
+  );
+  const readOnlyIntent = /(?:\?|what|which|where|current|check|show|tell|can|ready|\u043d\u0430\s+\u043a\u0430\u043a\u043e\u0439|\u043a\u0430\u043a\u0430\u044f|\u0433\u0434\u0435|\u0441\u0435\u0439\u0447\u0430\u0441|\u043f\u0440\u043e\u0432\u0435\u0440|\u043f\u043e\u043a\u0430\u0436|\u0441\u043a\u0430\u0436|\u043c\u043e\u0436\u043d\u043e|\u0433\u043e\u0442\u043e\u0432)/iu.test(
+    normalized,
+  );
+  const directStatusQuestion = /(?:current\s+branch|which\s+branch|what\s+branch|git\s+status|repository\s+status|project\s+status|working\s+tree|changed\s+files|\u043d\u0430\s+\u043a\u0430\u043a\u043e\u0439\s+\u0432\u0435\u0442\u043a|\u043a\u0430\u043a\u0430\u044f\s+\u0432\u0435\u0442\u043a|\u0447\u0442\u043e\s+\u0438\u0437\u043c\u0435\u043d|\u043c\u043e\u0436\u043d\u043e\s+\u043f\u0443\u0448|\u0441\u043e\u0441\u0442\u043e\u044f\u043d\w*\s+\u043f\u0440\u043e\u0435\u043a\u0442)/iu.test(
+    normalized,
+  );
+
+  return (directStatusQuestion || (statusSignal && readOnlyIntent)) && !implementationIntent;
+}
+
 function formatGitMcpContext(result: GitMcpToolCallResult) {
   if (!result.connected || !result.structuredContent) {
     return [
@@ -271,6 +293,12 @@ function formatGitMcpContext(result: GitMcpToolCallResult) {
     "- Connected: yes",
     `- Repository root: ${status.repositoryRoot}`,
     `- Branch: ${status.branch || "unknown"}`,
+    `- Upstream: ${status.upstream || "not set"}`,
+    `- Ahead/behind: ${
+      status.ahead === null || status.behind === null
+        ? "n/a"
+        : `${status.ahead}/${status.behind}`
+    }`,
     `- Working tree: ${status.isClean ? "clean" : "has changes"}`,
     `- Changed files: ${status.changedFileCount}`,
     changedFiles.length
@@ -298,6 +326,37 @@ function formatGitMcpEventDetail(result: GitMcpToolCallResult) {
   return `Day 17 Git MCP tool called ${result.toolName}; branch ${status.branch}, ${
     status.isClean ? "clean working tree" : `${status.changedFileCount} changed file(s)`
   }, ${status.recentCommits.length} recent commit(s) returned.`;
+}
+
+function formatReadOnlyGitMcpAnswer(result: GitMcpToolCallResult) {
+  if (!result.connected || !result.structuredContent) {
+    return [
+      "Не смог проверить состояние репозитория через Day 17 Git MCP tool.",
+      result.error ? `Ошибка: ${result.error}` : "MCP tool не вернул structured result.",
+    ].join("\n");
+  }
+
+  const status = result.structuredContent;
+  const latestCommit = status.recentCommits[0];
+  const upstreamText = status.upstream
+    ? `${status.upstream}, ahead ${status.ahead ?? "n/a"}, behind ${status.behind ?? "n/a"}`
+    : "upstream не настроен для текущей ветки";
+  const pushText =
+    status.ahead !== null && status.ahead > 0
+      ? `Есть ${status.ahead} commit(s), которые можно push.`
+      : status.ahead === 0
+        ? "Новых commit(s) для push относительно upstream нет."
+        : "Сказать, есть ли что push относительно upstream, нельзя: upstream не настроен.";
+
+  return [
+    `Сейчас мы на ветке \`${status.branch || "unknown"}\`.`,
+    `Рабочее дерево: ${status.isClean ? "clean" : `есть ${status.changedFileCount} измененных file(s)`}.`,
+    `Upstream: ${upstreamText}.`,
+    latestCommit
+      ? `Последний commit: \`${latestCommit.hash}\` ${latestCommit.subject}.`
+      : "Последние commit(s) не вернулись.",
+    pushText,
+  ].join("\n");
 }
 
 function normalizeWords(text: string) {
@@ -3721,6 +3780,131 @@ export async function POST(request: Request) {
       activeTaskRun && activeTaskRun.context.state !== "done"
         ? activeTaskRun
         : createInitialTaskRun(prompt);
+    const isReadOnlyStatusRequest = isReadOnlyProjectStatusPrompt(prompt);
+    if (isReadOnlyStatusRequest) {
+      const startedAt = performance.now();
+      const gitMcpResult = await callGitRepositoryStatusTool();
+      const gitMcpContext = formatGitMcpContext(gitMcpResult);
+      const assistantAnswer = formatReadOnlyGitMcpAnswer(gitMcpResult);
+      const structured: AssistantStructuredResult = {
+        answer: assistantAnswer,
+        branch: {
+          action: "keep",
+          title: null,
+          summary: null,
+          reason:
+            "Read-only project status question answered from Day 17 Git MCP data.",
+        },
+        memoryUpdates: [],
+        confirmationQuestion: null,
+      };
+      const userMessage: ChatMessage = {
+        role: "user",
+        content: prompt,
+        profileId: activeProfile.id,
+      };
+      const assistantMessage: ChatMessage = {
+        role: "assistant",
+        content: assistantAnswer,
+        profileId: activeProfile.id,
+      };
+      const branchUpdate = updateBranch({
+        dialog: active,
+        selectedBranch: selected.branch,
+        structured,
+        userMessage,
+        assistantMessage,
+        needsSummary,
+        activeProfileId: activeProfile.id,
+      });
+      const contextTokens = estimateTextTokens(gitMcpContext).estimatedTokens;
+      const requestTokens = estimateTextTokens(prompt).estimatedTokens;
+      const responseTokens = estimateTextTokens(assistantAnswer).estimatedTokens;
+      const totalTokens = contextTokens + requestTokens + responseTokens;
+      const metricRow: TokenMetricRow = {
+        id: makeMemoryLayerId("memory-metric"),
+        turn: active.metrics.length + 1,
+        status: "sent",
+        requestTokens,
+        contextTokens,
+        responseTokens,
+        totalTokens,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        providerCost: null,
+        note: `Read-only Git MCP status answer for branch "${selected.branch.title}".`,
+      };
+      const nextMetrics = [...active.metrics, metricRow];
+      const shortTermEvents: MemoryLayerEvent[] = [
+        {
+          layer: "shortTerm",
+          action: "saved",
+          detail:
+            "Read-only user question and Git MCP answer were stored in the selected topic branch.",
+          filePath: state.filePaths.shortTerm,
+        },
+        {
+          layer: "shortTerm",
+          action: "selected_branch",
+          detail: `${selected.branch.title}: ${selected.reason}`,
+          filePath: state.filePaths.shortTerm,
+        },
+        {
+          layer: "shortTerm",
+          action: "prompt_context",
+          detail:
+            "Day 17 Git MCP result was used for a read-only status answer. Existing lifecycle task state and task-local invariants were preserved but not applied.",
+          filePath: state.filePaths.shortTerm,
+        },
+        {
+          layer: "shortTerm",
+          action: "prompt_context",
+          detail: formatGitMcpEventDetail(gitMcpResult),
+          filePath: state.filePaths.shortTerm,
+        },
+        {
+          layer: "longTerm",
+          action: "skipped",
+          detail:
+            "Profile extraction skipped for a read-only project status question.",
+          filePath: state.filePaths.userProfiles,
+        },
+        ...branchUpdate.events.map((event) => ({
+          ...event,
+          filePath: event.filePath || state.filePaths.shortTerm,
+        })),
+      ];
+      const nextState = withUpdatedActiveMemoryDialog(
+        addGlobalMetricRow(state, metricRow),
+        (dialog) => ({
+          ...dialog,
+          activeBranchId: branchUpdate.activeBranchId,
+          branches: branchUpdate.branches,
+          messages: branchUpdate.messages,
+          metrics: nextMetrics,
+          compactMetricsSummary: summarizeMetrics(nextMetrics),
+          pendingConfirmation: null,
+          taskRun: active.taskRun,
+        }),
+      );
+      await writeMemoryLayersState(nextState);
+
+      return NextResponse.json({
+        ...nextState,
+        events: shortTermEvents,
+        recentMessageCount: recentMessages.length,
+        result: {
+          answer: assistantAnswer,
+          model: "git-mcp-readonly",
+          elapsedMs: metricRow.elapsedMs,
+          usage: {
+            promptTokens: null,
+            completionTokens: null,
+            totalTokens: null,
+            providerCost: null,
+          },
+        },
+      });
+    }
     let extractorError: string | null = null;
     let extractedProfileUpdates: AssistantProfileUpdate[] = [];
     try {

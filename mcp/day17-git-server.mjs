@@ -52,12 +52,43 @@ async function currentBranch() {
   return `detached:${hash}`;
 }
 
+async function upstreamStatus() {
+  try {
+    const upstream = await git([
+      "rev-parse",
+      "--abbrev-ref",
+      "--symbolic-full-name",
+      "@{u}",
+    ]);
+    const counts = await git([
+      "rev-list",
+      "--left-right",
+      "--count",
+      `${upstream}...HEAD`,
+    ]);
+    const [behindText, aheadText] = counts.split(/\s+/);
+
+    return {
+      upstream,
+      ahead: Number.parseInt(aheadText, 10) || 0,
+      behind: Number.parseInt(behindText, 10) || 0,
+    };
+  } catch {
+    return {
+      upstream: null,
+      ahead: null,
+      behind: null,
+    };
+  }
+}
+
 async function readRepositoryStatus({
   includeChangedFiles,
   includeRecentCommits,
 }) {
-  const [branch, statusOutput, commitsOutput] = await Promise.all([
+  const [branch, upstream, statusOutput, commitsOutput] = await Promise.all([
     currentBranch(),
+    upstreamStatus(),
     git(["status", "--short"]),
     includeRecentCommits
       ? git(["log", "--pretty=format:%h%x09%s", "-5"])
@@ -79,6 +110,9 @@ async function readRepositoryStatus({
   return {
     repositoryRoot,
     branch,
+    upstream: upstream.upstream,
+    ahead: upstream.ahead,
+    behind: upstream.behind,
     isClean: statusLines.length === 0,
     changedFileCount: statusLines.length,
     changedFiles,
@@ -111,6 +145,9 @@ server.registerTool(
     outputSchema: {
       repositoryRoot: z.string(),
       branch: z.string(),
+      upstream: z.string().nullable(),
+      ahead: z.number().nullable(),
+      behind: z.number().nullable(),
       isClean: z.boolean(),
       changedFileCount: z.number(),
       changedFiles: z.array(

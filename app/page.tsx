@@ -344,6 +344,9 @@ type GitMcpRecentCommit = {
 type GitMcpRepositoryStatus = {
   repositoryRoot: string;
   branch: string;
+  upstream: string | null;
+  ahead: number | null;
+  behind: number | null;
   isClean: boolean;
   changedFileCount: number;
   changedFiles: GitMcpChangedFile[];
@@ -2887,11 +2890,18 @@ function GitMcpToolPanel({
             <strong>Repository</strong>
             <span>{repositoryStatus.repositoryRoot}</span>
             <small>Branch: {repositoryStatus.branch || "unknown"}</small>
+            <small>Upstream: {repositoryStatus.upstream || "not set"}</small>
           </li>
           <li>
             <strong>Working tree</strong>
             <span>{repositoryStatus.isClean ? "Clean" : "Has changes"}</span>
             <small>Changed files: {repositoryStatus.changedFileCount}</small>
+            <small>
+              Ahead/behind:{" "}
+              {repositoryStatus.ahead === null || repositoryStatus.behind === null
+                ? "n/a"
+                : `${repositoryStatus.ahead}/${repositoryStatus.behind}`}
+            </small>
           </li>
           <li>
             <strong>Changed files</strong>
