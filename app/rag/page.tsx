@@ -64,11 +64,30 @@ type QueryResult = {
   }>;
 };
 
+type RerankResult = {
+  question: string;
+  rewrittenQuestion: string;
+  parameters: {
+    initialTopK: number;
+    finalTopK: number;
+    threshold: number;
+  };
+  baseline: QueryResult["matches"];
+  filtered: QueryResult["matches"];
+  reranked: Array<QueryResult["matches"][number] & { rerankScore?: number }>;
+  answer: {
+    answer: string;
+    mode: string;
+    warning: string | null;
+  };
+};
+
 export default function RagWeekPage() {
-  const [activeStage, setActiveStage] = useState<"day21" | "day22">("day21");
+  const [activeStage, setActiveStage] = useState<"day21" | "day22" | "day23">("day21");
   const [status, setStatus] = useState<RagStatus | null>(null);
   const [result, setResult] = useState<IndexResult | null>(null);
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
+  const [rerankResult, setRerankResult] = useState<RerankResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [queryLoading, setQueryLoading] = useState(false);
@@ -82,6 +101,10 @@ export default function RagWeekPage() {
   const [strategy, setStrategy] = useState("structural");
   const [topK, setTopK] = useState("8");
   const [generationMode, setGenerationMode] = useState("local");
+  const [initialTopK, setInitialTopK] = useState("15");
+  const [finalTopK, setFinalTopK] = useState("5");
+  const [threshold, setThreshold] = useState("0.24");
+  const [useRewrite, setUseRewrite] = useState(true);
 
   async function loadStatus() {
     const response = await fetch("/api/rag/status");
@@ -172,6 +195,37 @@ export default function RagWeekPage() {
     }
   }
 
+  async function runRerank(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setQueryLoading(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/rag/rerank", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          strategy,
+          initialTopK: Number(initialTopK),
+          finalTopK: Number(finalTopK),
+          threshold: Number(threshold),
+          useRewrite,
+          generationMode,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "Rerank query failed.");
+      }
+      setRerankResult(payload);
+      setActiveStage("day23");
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Rerank query failed.");
+    } finally {
+      setQueryLoading(false);
+    }
+  }
+
   const latest = result?.comparison ?? status?.manifest?.day21?.comparison ?? null;
 
   return (
@@ -201,7 +255,11 @@ export default function RagWeekPage() {
         >
           Day 22 RAG
         </button>
-        <button disabled type="button">
+        <button
+          className={activeStage === "day23" ? "active" : ""}
+          onClick={() => setActiveStage("day23")}
+          type="button"
+        >
           Day 23 Filter
         </button>
         <button disabled type="button">
@@ -375,6 +433,120 @@ export default function RagWeekPage() {
               </div>
             ) : (
               <div className="empty">Run a question to compare both modes.</div>
+            )}
+          </section>
+        </section>
+      )}
+
+      {activeStage === "day23" && (
+        <section className="rag-tool-grid">
+          <form className="rag-panel" onSubmit={runRerank}>
+            <div className="card-head">
+              <h2>Filter and rerank</h2>
+              <span>{strategy}</span>
+            </div>
+            <label className="rag-textarea-label">
+              Question
+              <textarea
+                onChange={(event) => setQuestion(event.target.value)}
+                rows={4}
+                value={question}
+              />
+            </label>
+            <div className="rag-control-grid">
+              <label>
+                Initial top-K
+                <input
+                  inputMode="numeric"
+                  onChange={(event) => setInitialTopK(event.target.value)}
+                  value={initialTopK}
+                />
+              </label>
+              <label>
+                Final top-K
+                <input
+                  inputMode="numeric"
+                  onChange={(event) => setFinalTopK(event.target.value)}
+                  value={finalTopK}
+                />
+              </label>
+              <label>
+                Threshold
+                <input
+                  inputMode="decimal"
+                  onChange={(event) => setThreshold(event.target.value)}
+                  value={threshold}
+                />
+              </label>
+              <label>
+                Strategy
+                <select onChange={(event) => setStrategy(event.target.value)} value={strategy}>
+                  <option value="structural">Structural</option>
+                  <option value="fixed">Fixed</option>
+                </select>
+              </label>
+            </div>
+            <label className="rag-check">
+              <input
+                checked={useRewrite}
+                onChange={(event) => setUseRewrite(event.target.checked)}
+                type="checkbox"
+              />
+              Query rewrite
+            </label>
+            <button className="run" disabled={queryLoading} type="submit">
+              {queryLoading ? "Reranking..." : "Run filter"}
+            </button>
+            {error && <p className="rag-error">{error}</p>}
+          </form>
+
+          <section className="rag-panel">
+            <div className="card-head">
+              <h2>Rerank result</h2>
+              <span>{rerankResult ? `${rerankResult.reranked.length} final` : "pending"}</span>
+            </div>
+            {rerankResult ? (
+              <div className="rag-answer-grid">
+                <article>
+                  <h3>Rewritten query</h3>
+                  <pre>{rerankResult.rewrittenQuestion}</pre>
+                </article>
+                <div className="rag-metrics">
+                  <article>
+                    <strong>{rerankResult.baseline.length}</strong>
+                    <span>baseline</span>
+                  </article>
+                  <article>
+                    <strong>{rerankResult.filtered.length}</strong>
+                    <span>after filter</span>
+                  </article>
+                  <article>
+                    <strong>{rerankResult.reranked.length}</strong>
+                    <span>after rerank</span>
+                  </article>
+                  <article>
+                    <strong>{rerankResult.parameters.threshold}</strong>
+                    <span>threshold</span>
+                  </article>
+                </div>
+                <article>
+                  <h3>Answer from reranked context</h3>
+                  <pre>{rerankResult.answer.answer}</pre>
+                </article>
+                <details open>
+                  <summary>Final chunks</summary>
+                  {rerankResult.reranked.map((match) => (
+                    <div className="rag-source" key={match.id}>
+                      <strong>{match.score.toFixed(3)}</strong>
+                      <span>
+                        {match.metadata.source} · {match.metadata.section}
+                      </span>
+                    </div>
+                  ))}
+                </details>
+              </div>
+            ) : (
+              <div className="empty">Run filtering to inspect reranked context.</div>
             )}
           </section>
         </section>
