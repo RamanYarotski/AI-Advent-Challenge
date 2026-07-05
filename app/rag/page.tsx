@@ -82,12 +82,37 @@ type RerankResult = {
   };
 };
 
+type CitedAnswerResult = {
+  status: "answered" | "unknown";
+  answer: string;
+  topScore: number;
+  minScore: number;
+  minLexicalOverlap: number;
+  sources: Array<{
+    source: string;
+    section: string;
+    chunk_id: string;
+    score: number;
+  }>;
+  citations: Array<{
+    id: string;
+    source: string;
+    section: string;
+    chunk_id: string;
+    score: number;
+    quote: string;
+  }>;
+};
+
 export default function RagWeekPage() {
-  const [activeStage, setActiveStage] = useState<"day21" | "day22" | "day23">("day21");
+  const [activeStage, setActiveStage] = useState<"day21" | "day22" | "day23" | "day24">(
+    "day21",
+  );
   const [status, setStatus] = useState<RagStatus | null>(null);
   const [result, setResult] = useState<IndexResult | null>(null);
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
   const [rerankResult, setRerankResult] = useState<RerankResult | null>(null);
+  const [citedResult, setCitedResult] = useState<CitedAnswerResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [queryLoading, setQueryLoading] = useState(false);
@@ -104,6 +129,8 @@ export default function RagWeekPage() {
   const [initialTopK, setInitialTopK] = useState("15");
   const [finalTopK, setFinalTopK] = useState("5");
   const [threshold, setThreshold] = useState("0.24");
+  const [minScore, setMinScore] = useState("0.24");
+  const [minLexicalOverlap, setMinLexicalOverlap] = useState("0.08");
   const [useRewrite, setUseRewrite] = useState(true);
 
   async function loadStatus() {
@@ -226,6 +253,38 @@ export default function RagWeekPage() {
     }
   }
 
+  async function runCitedAnswer(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setQueryLoading(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/rag/cited-answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          strategy,
+          initialTopK: Number(initialTopK),
+          finalTopK: Number(finalTopK),
+          threshold: Number(threshold),
+          minScore: Number(minScore),
+          minLexicalOverlap: Number(minLexicalOverlap),
+          useRewrite,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "Cited answer failed.");
+      }
+      setCitedResult(payload);
+      setActiveStage("day24");
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Cited answer failed.");
+    } finally {
+      setQueryLoading(false);
+    }
+  }
+
   const latest = result?.comparison ?? status?.manifest?.day21?.comparison ?? null;
 
   return (
@@ -262,7 +321,11 @@ export default function RagWeekPage() {
         >
           Day 23 Filter
         </button>
-        <button disabled type="button">
+        <button
+          className={activeStage === "day24" ? "active" : ""}
+          onClick={() => setActiveStage("day24")}
+          type="button"
+        >
           Day 24 Citations
         </button>
         <button disabled type="button">
@@ -463,6 +526,14 @@ export default function RagWeekPage() {
                 />
               </label>
               <label>
+                Lexical overlap
+                <input
+                  inputMode="decimal"
+                  onChange={(event) => setMinLexicalOverlap(event.target.value)}
+                  value={minLexicalOverlap}
+                />
+              </label>
+              <label>
                 Final top-K
                 <input
                   inputMode="numeric"
@@ -547,6 +618,122 @@ export default function RagWeekPage() {
               </div>
             ) : (
               <div className="empty">Run filtering to inspect reranked context.</div>
+            )}
+          </section>
+        </section>
+      )}
+
+      {activeStage === "day24" && (
+        <section className="rag-tool-grid">
+          <form className="rag-panel" onSubmit={runCitedAnswer}>
+            <div className="card-head">
+              <h2>Cited answer</h2>
+              <span>{strategy}</span>
+            </div>
+            <label className="rag-textarea-label">
+              Question
+              <textarea
+                onChange={(event) => setQuestion(event.target.value)}
+                rows={4}
+                value={question}
+              />
+            </label>
+            <div className="rag-control-grid">
+              <label>
+                Min score
+                <input
+                  inputMode="decimal"
+                  onChange={(event) => setMinScore(event.target.value)}
+                  value={minScore}
+                />
+              </label>
+              <label>
+                Threshold
+                <input
+                  inputMode="decimal"
+                  onChange={(event) => setThreshold(event.target.value)}
+                  value={threshold}
+                />
+              </label>
+              <label>
+                Initial top-K
+                <input
+                  inputMode="numeric"
+                  onChange={(event) => setInitialTopK(event.target.value)}
+                  value={initialTopK}
+                />
+              </label>
+              <label>
+                Final top-K
+                <input
+                  inputMode="numeric"
+                  onChange={(event) => setFinalTopK(event.target.value)}
+                  value={finalTopK}
+                />
+              </label>
+            </div>
+            <label className="rag-check">
+              <input
+                checked={useRewrite}
+                onChange={(event) => setUseRewrite(event.target.checked)}
+                type="checkbox"
+              />
+              Query rewrite
+            </label>
+            <button className="run" disabled={queryLoading} type="submit">
+              {queryLoading ? "Answering..." : "Answer with citations"}
+            </button>
+            {error && <p className="rag-error">{error}</p>}
+          </form>
+
+          <section className="rag-panel">
+            <div className="card-head">
+              <h2>Grounded answer</h2>
+              <span>{citedResult ? citedResult.status : "pending"}</span>
+            </div>
+            {citedResult ? (
+              <div className="rag-answer-grid">
+                <div className="rag-metrics">
+                  <article>
+                    <strong>{citedResult.topScore.toFixed(3)}</strong>
+                    <span>top score</span>
+                  </article>
+                  <article>
+                    <strong>{citedResult.minScore}</strong>
+                    <span>min score</span>
+                  </article>
+                  <article>
+                    <strong>{citedResult.minLexicalOverlap}</strong>
+                    <span>lexical gate</span>
+                  </article>
+                  <article>
+                    <strong>{citedResult.sources.length}</strong>
+                    <span>sources</span>
+                  </article>
+                  <article>
+                    <strong>{citedResult.citations.length}</strong>
+                    <span>citations</span>
+                  </article>
+                </div>
+                <article>
+                  <h3>Answer</h3>
+                  <pre>{citedResult.answer}</pre>
+                </article>
+                <details open>
+                  <summary>Citations</summary>
+                  {citedResult.citations.map((citation) => (
+                    <div className="rag-citation" key={citation.id}>
+                      <strong>
+                        {citation.source} · {citation.section}
+                      </strong>
+                      <span>{citation.chunk_id}</span>
+                      <p>{citation.quote}</p>
+                    </div>
+                  ))}
+                </details>
+              </div>
+            ) : (
+              <div className="empty">Run a cited answer to inspect grounding.</div>
             )}
           </section>
         </section>
