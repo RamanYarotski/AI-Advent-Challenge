@@ -467,6 +467,28 @@ textarea:focus {
   margin: 0;
 }
 
+.branch-status {
+  background: #eef8f6;
+  border: 1px solid #b7ded8;
+  border-radius: 999px;
+  color: var(--accent-dark);
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+  margin-left: auto;
+  max-width: min(260px, 35vw);
+  overflow: hidden;
+  padding: 8px 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branch-status.warning {
+  background: #fff7ed;
+  border-color: #fed7aa;
+  color: #9a3412;
+}
+
 .icon-button {
   align-items: center;
   background: var(--panel);
@@ -763,6 +785,14 @@ textarea:focus {
   display: flex;
   gap: 12px;
   justify-content: space-between;
+}
+
+.task-run-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 .task-run-head div:first-child,
@@ -1363,6 +1393,12 @@ textarea:focus {
   color: var(--accent-dark);
 }
 
+.mcp-advanced-details .mcp-tools-panel {
+  border: 0;
+  margin-top: 12px;
+  padding: 0;
+}
+
 .fact-list {
   display: grid;
   gap: 6px;
@@ -1634,6 +1670,12 @@ td pre {
   .assistant-toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .branch-status {
+    align-self: flex-start;
+    margin-left: 0;
+    max-width: 100%;
   }
 
   .icon-button {

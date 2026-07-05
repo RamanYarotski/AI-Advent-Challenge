@@ -191,6 +191,71 @@ async function loadBriefingCache(input = {}) {
   };
 }
 
+function comparablePath(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return "";
+  }
+  const normalized = path.normalize(value.trim());
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function currentSourcePath(cache, schedulerStatus) {
+  return (
+    (typeof cache.source?.path === "string" && cache.source.path) ||
+    (typeof schedulerStatus.source?.path === "string" && schedulerStatus.source.path) ||
+    ""
+  );
+}
+
+function normalizedDayList(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return Array.from(
+    new Set(
+      value
+        .map((item) => Number.parseInt(String(item ?? ""), 10))
+        .filter((item) => Number.isFinite(item) && item > 0 && item < 100),
+    ),
+  ).sort((left, right) => left - right);
+}
+
+function sameTargetDays(left, right) {
+  const leftDays = normalizedDayList(left);
+  const rightDays = normalizedDayList(right);
+  return (
+    leftDays.length === rightDays.length &&
+    leftDays.every((day, index) => day === rightDays[index])
+  );
+}
+
+function targetDaysFromDigest(digest) {
+  const directDays = normalizedDayList(digest?.targetDays);
+  if (directDays.length) {
+    return directDays;
+  }
+  const title = typeof digest?.title === "string" ? digest.title : "";
+  return normalizedDayList(title.match(/\d{1,3}/g) ?? []);
+}
+
+function extractionMatchesCurrent(extraction, cache, schedulerStatus, settings) {
+  return (
+    isRecord(extraction) &&
+    comparablePath(extraction.sourcePath) ===
+      comparablePath(currentSourcePath(cache, schedulerStatus)) &&
+    sameTargetDays(extraction.targetDays, settings.targetDays)
+  );
+}
+
+function digestMatchesCurrent(digest, cache, schedulerStatus, settings) {
+  return (
+    isRecord(digest) &&
+    comparablePath(digest.sourcePath) ===
+      comparablePath(currentSourcePath(cache, schedulerStatus)) &&
+    sameTargetDays(targetDaysFromDigest(digest), settings.targetDays)
+  );
+}
+
 function extractionSettings(input, cache, schedulerStatus) {
   const cachedProfile = isRecord(cache.briefingProfile)
     ? cache.briefingProfile
@@ -320,12 +385,16 @@ async function loadExtraction(input = {}) {
   if (isRecord(input.extraction)) {
     return input.extraction;
   }
-  const { paths } = await loadBriefingCache(input);
+  const { schedulerStatus, paths, cache } = await loadBriefingCache(input);
   if (typeof input.extractionPath === "string" && input.extractionPath.trim()) {
     return readJsonFile(input.extractionPath, null);
   }
   if (existsSync(paths.latestExtraction)) {
-    return readJsonFile(paths.latestExtraction, null);
+    const extraction = await readJsonFile(paths.latestExtraction, null);
+    const settings = extractionSettings(input, cache, schedulerStatus);
+    if (extractionMatchesCurrent(extraction, cache, schedulerStatus, settings)) {
+      return extraction;
+    }
   }
   const extracted = await extractBriefingMessages(input);
   return extracted.extraction;
@@ -416,6 +485,7 @@ export async function buildChallengeDigest(input = {}) {
     dataRoot: extraction.dataRoot,
     sourcePath: extraction.sourcePath,
     parserPreset: extraction.parserPreset,
+    targetDays: extraction.targetDays,
     generatedAt: nowIso(),
     totals: {
       totalCachedMessages: extraction.totalCachedMessages,
@@ -481,12 +551,16 @@ async function loadDigest(input = {}) {
   if (isRecord(input.digest)) {
     return input.digest;
   }
-  const { paths } = await loadBriefingCache(input);
+  const { schedulerStatus, paths, cache } = await loadBriefingCache(input);
   if (typeof input.digestPath === "string" && input.digestPath.trim()) {
     return readJsonFile(input.digestPath, null);
   }
   if (existsSync(paths.latestDigestDraft)) {
-    return readJsonFile(paths.latestDigestDraft, null);
+    const digest = await readJsonFile(paths.latestDigestDraft, null);
+    const settings = extractionSettings(input, cache, schedulerStatus);
+    if (digestMatchesCurrent(digest, cache, schedulerStatus, settings)) {
+      return digest;
+    }
   }
   const built = await buildChallengeDigest(input);
   return built.digest;

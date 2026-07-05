@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { NextResponse } from "next/server";
 import {
   addGlobalMetricRow,
@@ -30,6 +32,7 @@ import {
   type StageArtifact,
   type SwarmRun,
   type TaskContext,
+  type TaskDeliverableKind,
   type TaskInvariant,
   type TaskRun,
   type TaskState,
@@ -47,15 +50,6 @@ import {
   writeMemoryLayersState,
 } from "@/lib/agent/memory-layers-store";
 import { callLlm, type ChatMessage, type LlmResult } from "@/lib/llm";
-import {
-  callGitRepositoryStatusTool,
-  type GitMcpToolCallResult,
-} from "@/lib/mcp/day17-git-tool";
-import {
-  callDay18SchedulerTool,
-  type Day18SchedulerAction,
-  type Day18SchedulerToolCallResult,
-} from "@/lib/mcp/day18-scheduler-tool";
 import {
   estimateMessageTokens,
   estimateTextTokens,
@@ -85,7 +79,8 @@ type MemoryLayerAction =
   | "dismiss_all_profile_updates"
   | "create_invariant"
   | "update_invariant"
-  | "delete_invariant";
+  | "delete_invariant"
+  | "reset_task_run";
 
 type MemoryLayersRequestBody = {
   action?: MemoryLayerAction;
@@ -181,6 +176,37 @@ type TaskOrchestrationResult = {
   validationResult: ValidationResult | null;
 };
 
+type WorkflowMcpPlanIntent = {
+  requestedDay: number | null;
+  wantsDialogPlan: boolean;
+};
+
+type WorkflowMcpAssignmentAvailability = {
+  requestedDay: number | null;
+  sourcePath: string | null;
+  digestPath: string | null;
+  currentSourcePath: string | null;
+  digestSourcePath: string | null;
+  contextSource: "digest" | "cache" | "none";
+  staleDigest: boolean;
+  sourceFound: boolean;
+  assignmentFound: boolean;
+  assignmentMarkerCount: number;
+  reason: string;
+  status: "found" | "missing" | "source_unavailable";
+};
+
+type WorkflowMcpPlanningContext = {
+  available: boolean;
+  contract: RequirementsContract;
+  externalContext: string;
+  sourcePath: string | null;
+  assignmentText: string | null;
+  deliverableKind: TaskDeliverableKind;
+  assignmentAvailability: WorkflowMcpAssignmentAvailability;
+  unavailableMessage: string | null;
+};
+
 const MAX_RECENT_BRANCH_MESSAGES = 8;
 const SUMMARY_TRIGGER_MESSAGES = 12;
 const AUTO_SAVE_CONFIDENCE = 0.72;
@@ -211,6 +237,24 @@ const ALLOWED_TASK_TRANSITIONS = new Set([
   "acceptance->done",
 ]);
 
+const DEFAULT_WORKFLOW_DATA_ROOT = path.join(process.cwd(), ".data", "mcp-workflows");
+const DEFAULT_SCHEDULER_INDEX_FILE = path.join(
+  process.cwd(),
+  ".data",
+  "day-18",
+  "scheduler-index.json",
+);
+
+const WORKFLOW_MCP_CONTEXT_POLICY = [
+  "Workflow and MCP policy:",
+  "- The lifecycle workflow is the highest-priority orchestration layer.",
+  "- MCP is a capability layer inside that workflow, not an alternative mode.",
+  "- Read-only MCP/context loads may be used during Planning and Execution to ground the artifact.",
+  "- Mutating MCP actions require stage-appropriate approval or an explicit UI/scheduled trigger before the call.",
+  "- When saved MCP workflow results are available, use them as external context and cite the source.",
+  "- Do not claim a mutating MCP action ran from chat unless the lifecycle stage and trigger actually allowed it.",
+].join("\n");
+
 function layerLabel(layer: MemoryLayerKey) {
   if (layer === "shortTerm") {
     return "short-term";
@@ -240,565 +284,6 @@ function formatNotes(title: string, notes: MemoryLayerNote[]) {
     .slice(-16)
     .map((note) => `- ${note.text}`)
     .join("\n")}`;
-}
-
-function shouldAttachGitMcpContext(prompt: string, taskRun: TaskRun) {
-  const text = [
-    prompt,
-    taskRun.context.task,
-    taskRun.context.current,
-    taskRun.context.plan.join(" "),
-  ].join(" ");
-
-  return /\bday\s*17\b|день\s*17|mcp|git|repository|repo|status|branch|commit|project state|working tree|инструмент|репозит|статус|ветк|коммит/iu.test(
-    text,
-  );
-}
-
-type GitMcpQuestionIntent = {
-  anyMcpSignal: boolean;
-  mutationIntent: boolean;
-  repository: boolean;
-  branch: boolean;
-  workingTree: boolean;
-  changedFiles: boolean;
-  commits: boolean;
-  upstream: boolean;
-  push: boolean;
-  mcp: boolean;
-  buttons: boolean;
-  broadStatus: boolean;
-  correction: boolean;
-};
-
-function classifyGitMcpQuestion(prompt: string): GitMcpQuestionIntent {
-  const normalized = prompt.trim().toLowerCase();
-  const implementationIntent = /(?:^|\s)(implement|create|build|add|fix|change|update|refactor|write|code|реализуй|создай|добавь|исправь|поменяй|обнови|напиши|сделай)(?:\s|$)/iu.test(
-    normalized,
-  );
-  const mutationIntent = /(?:^|\s)(merge|checkout|switch|reset|rebase|stash|stage|delete|remove|execute|deploy|закоммить|коммить|запуш|пушни|переключи|удали|запусти|выполни)(?:\s|$)/iu.test(
-    normalized,
-  );
-  const repository = /(?:repository|repo|\u0440\u0435\u043f\u043e\u0437\u0438\u0442)/iu.test(
-    normalized,
-  );
-  const branch = /(?:branch|\u0432\u0435\u0442\u043a)/iu.test(normalized);
-  const workingTree = /(?:git\s+status|status|working\s+tree|clean|dirty|\u0441\u0442\u0430\u0442\u0443\u0441|\u0441\u043e\u0441\u0442\u043e\u044f\u043d)/iu.test(
-    normalized,
-  );
-  const changedFiles = /(?:changed\s+files|changes|diff|modified|dirty|\u0438\u0437\u043c\u0435\u043d\u0435\u043d|\u0447\u0442\u043e\s+\u0438\u0437\u043c\u0435\u043d)/iu.test(
-    normalized,
-  );
-  const commits = /(?:commit|commits|\u043a\u043e\u043c\u043c\u0438\u0442)/iu.test(
-    normalized,
-  );
-  const upstream = /(?:upstream|ahead|behind|\u0430\u043f\u0441\u0442\u0440\u0438\u043c|\u0432\u043f\u0435\u0440\u0435\u0434\u0438|\u043f\u043e\u0437\u0430\u0434\u0438)/iu.test(
-    normalized,
-  );
-  const push = /(?:push|pushing|\u043f\u0443\u0448|\u0437\u0430\u043f\u0443\u0448)/iu.test(
-    normalized,
-  );
-  const mcp = /(?:mcp|tool|\u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442)/iu.test(
-    normalized,
-  );
-  const buttons = /(?:button|buttons|click|refresh|run git mcp|\u043a\u043d\u043e\u043f\u043a|\u043a\u043b\u0438\u043a|\u043d\u0430\u0436\u0430\u0442|\u0440\u0430\u0437\u043d\u0438\u0446|\u0441\u043c\u044b\u0441\u043b|\u043f\u043e\u043b\u044c\u0437)/iu.test(
-    normalized,
-  ) && mcp;
-  const broadStatus = /(?:project\s+state|project\s+status|repository\s+status|git\s+status|\u0441\u043e\u0441\u0442\u043e\u044f\u043d\w*\s+\u043f\u0440\u043e\u0435\u043a\u0442|\u0441\u0442\u0430\u0442\u0443\u0441\s+\u0440\u0435\u043f\u043e\u0437\u0438\u0442)/iu.test(
-    normalized,
-  );
-  const correction = /(?:you did not answer|didn't answer|not what i asked|\u043d\u0435\s+\u043e\u0442\u0432\u0435\u0442|\u043d\u0435\s+\u0441\u043f\u0440\u0430\u0448\u0438\u0432)/iu.test(
-    normalized,
-  );
-  const anyMcpSignal =
-    repository ||
-    branch ||
-    workingTree ||
-    changedFiles ||
-    commits ||
-    upstream ||
-    push ||
-    mcp ||
-    buttons ||
-    broadStatus;
-
-  return {
-    anyMcpSignal,
-    mutationIntent: implementationIntent || mutationIntent,
-    repository,
-    branch,
-    workingTree,
-    changedFiles,
-    commits,
-    upstream,
-    push,
-    mcp,
-    buttons,
-    broadStatus,
-    correction,
-  };
-}
-
-function isReadOnlyProjectStatusPrompt(prompt: string) {
-  const intent = classifyGitMcpQuestion(prompt);
-  return intent.anyMcpSignal && !intent.mutationIntent;
-}
-
-type Day18SchedulerIntent = {
-  anySchedulerSignal: boolean;
-  implementationIntent: boolean;
-  action: Day18SchedulerAction;
-  intervalSeconds: number;
-};
-
-function parseDay18SchedulerIntervalSeconds(prompt: string) {
-  const normalized = prompt.toLowerCase();
-  const intervalMatch = normalized.match(
-    /(?:every|each|interval|\u043a\u0430\u0436\u0434[\p{L}]*|\u0440\u0430\u0437\s+\u0432)\s+(\d+)\s*(s|sec|second|seconds|m|min|minute|minutes|\u0441|\u0441\u0435\u043a|\u0441\u0435\u043a\u0443\u043d\u0434[\p{L}]*|\u043c\u0438\u043d|\u043c\u0438\u043d\u0443\u0442[\p{L}]*)/iu,
-  );
-  if (!intervalMatch) {
-    return 10;
-  }
-
-  const value = Number.parseInt(intervalMatch[1], 10);
-  if (!Number.isFinite(value)) {
-    return 10;
-  }
-
-  const unit = intervalMatch[2];
-  const multiplier = /^(m|min|minute|minutes|\u043c\u0438\u043d)/iu.test(unit)
-    ? 60
-    : 1;
-
-  return Math.max(2, Math.min(3600, value * multiplier));
-}
-
-function classifyDay18SchedulerPrompt(prompt: string): Day18SchedulerIntent {
-  const normalized = prompt.trim().toLowerCase();
-  const implementationIntent = /(?:^|\s)(implement|create|build|add|fix|change|update|refactor|write|code|\u0440\u0435\u0430\u043b\u0438\u0437\u0443\u0439|\u0441\u043e\u0437\u0434\u0430\u0439|\u0434\u043e\u0431\u0430\u0432\u044c|\u0438\u0441\u043f\u0440\u0430\u0432\u044c|\u043f\u043e\u043c\u0435\u043d\u044f\u0439|\u043e\u0431\u043d\u043e\u0432\u0438|\u043d\u0430\u043f\u0438\u0448\u0438|\u0441\u0434\u0435\u043b\u0430\u0439)(?:\s|$)/iu.test(
-    normalized,
-  );
-  const day18 = /(?:day\s*18|\u0434\u0435\u043d[\p{L}]*\s*18)/iu.test(
-    normalized,
-  );
-  const scheduler = /(?:scheduler|schedule|scheduled|background|heartbeat|reminder|periodic|cron|\u043f\u043b\u0430\u043d\u0438\u0440\u043e\u0432|\u0440\u0430\u0441\u043f\u0438\u0441|\u0444\u043e\u043d\u043e\u0432|\u043d\u0430\u043f\u043e\u043c\u0438\u043d|\u043f\u0435\u0440\u0438\u043e\u0434\u0438\u0447|\u0441\u0432\u043e\u0434\u043a|\u0430\u0433\u0440\u0435\u0433)/iu.test(
-    normalized,
-  );
-  const anySchedulerSignal = scheduler || day18;
-  const reset = /(?:reset|clear|\u0441\u0431\u0440\u043e\u0441|\u043e\u0447\u0438\u0441\u0442)/iu.test(
-    normalized,
-  );
-  const stop = /(?:stop|disable|pause|\u043e\u0441\u0442\u0430\u043d\u043e\u0432|\u0432\u044b\u043a\u043b\u044e\u0447|\u043f\u0430\u0443\u0437)/iu.test(
-    normalized,
-  );
-  const tick = /(?:tick|trigger|now|manual|\u0441\u0435\u0439\u0447\u0430\u0441|\u0441\u0440\u0430\u0431\u043e\u0442|\u0440\u0430\u0437\u043e\u0432|\u0440\u0443\u0447\u043d)/iu.test(
-    normalized,
-  );
-  const start = /(?:start|run|enable|\u0437\u0430\u043f\u0443\u0441\u0442|\u0441\u0442\u0430\u0440\u0442|\u043d\u0430\u0447\u043d|\u0432\u043a\u043b\u044e\u0447)/iu.test(
-    normalized,
-  );
-  const action: Day18SchedulerAction = reset
-    ? "reset"
-    : stop
-      ? "stop"
-      : tick
-        ? "tick"
-        : start
-          ? "start"
-          : "status";
-
-  return {
-    anySchedulerSignal,
-    implementationIntent,
-    action,
-    intervalSeconds: parseDay18SchedulerIntervalSeconds(prompt),
-  };
-}
-
-function formatDay18SchedulerContext(result: Day18SchedulerToolCallResult) {
-  if (!result.connected || !result.structuredContent) {
-    return [
-      "Day 18 scheduler MCP tool result:",
-      `- Tool: ${result.toolName}`,
-      "- Connected: no",
-      `- Error: ${result.error ?? "No structured result was returned."}`,
-      "- Treat this scheduler context as unavailable.",
-    ].join("\n");
-  }
-
-  const structured = result.structuredContent;
-  const task = structured.task;
-  const aggregate = structured.latestAggregate;
-  const latestRun = structured.runs[structured.runs.length - 1];
-
-  return [
-    "Day 18 scheduler MCP tool result:",
-    `- Tool: ${result.toolName}`,
-    "- Connected: yes",
-    `- Requested action: ${result.requestedAction}`,
-    `- Scheduler enabled: ${structured.schedulerEnabled ? "yes" : "no"}`,
-    `- Worker active: ${result.runtime.workerActive ? "yes" : "no"}`,
-    `- Task: ${task.title} (${task.serverId}/${task.toolName})`,
-    `- Task enabled: ${task.enabled ? "yes" : "no"}`,
-    `- Schedule: ${task.schedule.mode}, interval ${task.schedule.intervalSeconds}s, daily ${task.schedule.dailyTime}`,
-    `- Next run: ${formatDay18NextRun(structured)}`,
-    `- File source: ${structured.source.path}`,
-    `- Parser preset: ${structured.source.parserPreset}`,
-    `- Data root: ${structured.dataRoot}`,
-    `- Cache: ${structured.storagePaths.messagesCache}`,
-    `- Aggregate file: ${structured.storagePaths.latestAggregate}`,
-    aggregate
-      ? `- Aggregate summary: ${aggregate.summary}`
-      : "- Aggregate summary: no run has completed yet",
-    aggregate
-      ? `- Relevant/new/priority/day messages: ${aggregate.totalRelevantMessages}/${aggregate.newRelevantMessages}/${aggregate.priorityAuthorMessages}/${aggregate.assignmentMessages}`
-      : "- Relevant/new/priority/day messages: n/a",
-    latestRun
-      ? `- Latest activity: ${latestRun.status}; ${formatDay18RunOutputSummary(latestRun)}`
-      : "- Latest activity: none",
-    "The MCP tool provides scheduled file-derived data. The assistant remains responsible for interpreting and explaining the aggregate.",
-  ].join("\n");
-}
-
-function formatDay18LocalTime(value: string | null) {
-  if (!value) {
-    return "n/a";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return `${new Intl.DateTimeFormat(undefined, {
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    month: "2-digit",
-    second: "2-digit",
-    timeZoneName: "short",
-    year: "numeric",
-  }).format(date)} local`;
-}
-
-function formatDay18NextRun(
-  structured: NonNullable<Day18SchedulerToolCallResult["structuredContent"]>,
-) {
-  const task = structured.task;
-  if (task.schedule.mode === "manual") {
-    return "manual only";
-  }
-  if (!structured.schedulerEnabled) {
-    return "paused - scheduler is off";
-  }
-  if (!task.enabled) {
-    return "paused - task is off";
-  }
-  return formatDay18LocalTime(task.nextRunAt);
-}
-
-function formatDay18RunOutputSummary(
-  run: NonNullable<
-    Day18SchedulerToolCallResult["structuredContent"]
-  >["runs"][number],
-) {
-  const raw = run.outputSummary || run.error || "no details";
-  return raw.replace(
-    "0 new relevant message(s) found in this run.",
-    "No new relevant messages since the previous scan.",
-  );
-}
-
-function formatDay18SchedulerEventDetail(result: Day18SchedulerToolCallResult) {
-  if (!result.connected || !result.structuredContent) {
-    return `Day 18 scheduler MCP tool call failed: ${
-      result.error ?? "No structured result was returned."
-    }`;
-  }
-
-  const structured = result.structuredContent;
-  const task = structured.task;
-  const aggregate = structured.latestAggregate;
-  return `Day 18 scheduler MCP tool called ${result.toolName}; action ${result.requestedAction}; scheduler=${structured.schedulerEnabled ? "enabled" : "disabled"}; task=${task.serverId}/${task.toolName}; relevant=${aggregate?.totalRelevantMessages ?? 0}; worker=${result.runtime.workerActive ? "active" : "idle"}.`;
-}
-
-function formatDay18DeltaText(
-  aggregate: NonNullable<
-    Day18SchedulerToolCallResult["structuredContent"]
-  >["latestAggregate"],
-) {
-  if (!aggregate) {
-    return "No scan has completed yet.";
-  }
-  if (aggregate.newRelevantMessages > 0) {
-    return `${aggregate.newRelevantMessages} new relevant message(s) were added in the latest run.`;
-  }
-  return `No new relevant messages since the previous scan; ${aggregate.totalRelevantMessages} cached message(s) are still available.`;
-}
-
-function formatDay18SchedulerAnswer(result: Day18SchedulerToolCallResult) {
-  if (!result.connected || !result.structuredContent) {
-    return [
-      "I could not call the Day 18 scheduler MCP tool.",
-      result.error ? `Error: ${result.error}` : "No structured result was returned.",
-    ].join("\n");
-  }
-
-  const structured = result.structuredContent;
-  const task = structured.task;
-  const aggregate = structured.latestAggregate;
-  const latest = aggregate?.recentMessages[0] ?? null;
-  const latestRun = structured.runs[structured.runs.length - 1] ?? null;
-  const actionLine =
-    result.requestedAction === "start"
-      ? "Scheduler worker started. It will run enabled due tasks while the app process is alive."
-      : result.requestedAction === "stop"
-        ? "Scheduler worker stopped. Stored cache and aggregates are still available."
-        : result.requestedAction === "tick"
-          ? "Manual MCP run completed."
-          : result.requestedAction === "reset"
-            ? "Scheduler storage was reset."
-            : result.requestedAction === "save_settings"
-              ? "Scheduler settings were saved."
-              : "Scheduler status read.";
-
-  return [
-    actionLine,
-    `Tool: \`${result.toolName}\`, connected: ${result.connected ? "yes" : "no"}.`,
-    `Scheduler: ${structured.schedulerEnabled ? "enabled" : "disabled"}; worker: ${result.runtime.workerActive ? "active" : "idle"}.`,
-    `Task: ${task.title}; target: \`${task.serverId}/${task.toolName}\`; task enabled: ${task.enabled ? "yes" : "no"}.`,
-    `Frequency: ${task.schedule.mode}; interval ${task.schedule.intervalSeconds}s; daily time ${task.schedule.dailyTime}; next run ${formatDay18NextRun(structured)}.`,
-    `File source: \`${structured.source.path}\`.`,
-    `Data root: \`${structured.dataRoot}\`.`,
-    `JSON storage: cache \`${structured.storagePaths.messagesCache}\`, aggregate \`${structured.storagePaths.latestAggregate}\`.`,
-    `Aggregate: ${aggregate?.summary ?? "No aggregate yet. Run the task once to build it."}`,
-    aggregate
-      ? `Relevant messages: ${aggregate.totalRelevantMessages} cached. ${formatDay18DeltaText(aggregate)} Priority-author messages: ${aggregate.priorityAuthorMessages}; day marker messages: ${aggregate.assignmentMessages}.`
-      : "Relevant messages: none cached yet.",
-    latest
-      ? `Latest cached message: ${latest.date || "unknown date"}, ${latest.author || "unknown author"}: ${latest.excerpt}`
-      : "Latest cached message: none yet.",
-    latestRun
-      ? `Latest activity: ${latestRun.status}; ${formatDay18RunOutputSummary(latestRun)}.`
-      : "Latest activity: none yet.",
-    "The MCP tool only provides scheduled file-derived data; the assistant is doing this interpretation layer.",
-  ].join("\n");
-}
-
-function formatGitMcpContext(result: GitMcpToolCallResult) {
-  if (!result.connected || !result.structuredContent) {
-    return [
-      "Day 17 MCP Git tool result:",
-      `- Tool: ${result.toolName}`,
-      "- Connected: no",
-      `- Error: ${result.error ?? "No structured result was returned."}`,
-      "- Treat this as unavailable project-state context.",
-    ].join("\n");
-  }
-
-  const status = result.structuredContent;
-  const changedFiles = status.changedFiles.slice(0, 8);
-  const recentCommits = status.recentCommits.slice(0, 5);
-
-  return [
-    "Day 17 MCP Git tool result:",
-    `- Tool: ${result.toolName}`,
-    "- Connected: yes",
-    `- Repository root: ${status.repositoryRoot}`,
-    `- Branch: ${status.branch || "unknown"}`,
-    `- Upstream: ${status.upstream || "not set"}`,
-    `- Ahead/behind: ${
-      status.ahead === null || status.behind === null
-        ? "n/a"
-        : `${status.ahead}/${status.behind}`
-    }`,
-    `- Working tree: ${status.isClean ? "clean" : "has changes"}`,
-    `- Changed files: ${status.changedFileCount}`,
-    changedFiles.length
-      ? `- Changed file details:\n${changedFiles
-          .map((file) => `  - ${file.status}: ${file.path}`)
-          .join("\n")}`
-      : "- Changed file details: none",
-    recentCommits.length
-      ? `- Recent commits:\n${recentCommits
-          .map((commit) => `  - ${commit.hash}: ${commit.subject}`)
-          .join("\n")}`
-      : "- Recent commits: none requested or none returned",
-    "Use these facts as read-only repository data. The agent remains responsible for analysis, summary, and next-step recommendations.",
-  ].join("\n");
-}
-
-function formatGitMcpEventDetail(result: GitMcpToolCallResult) {
-  if (!result.connected || !result.structuredContent) {
-    return `Day 17 Git MCP tool call failed: ${
-      result.error ?? "No structured result was returned."
-    }`;
-  }
-
-  const status = result.structuredContent;
-  return `Day 17 Git MCP tool called ${result.toolName}; branch ${status.branch}, ${
-    status.isClean ? "clean working tree" : `${status.changedFileCount} changed file(s)`
-  }, ${status.recentCommits.length} recent commit(s) returned.`;
-}
-
-function gitMcpRepositoryName(repositoryRoot: string) {
-  const parts = repositoryRoot.split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] || repositoryRoot || "unknown";
-}
-
-function formatGitMcpChangedFiles(status: NonNullable<GitMcpToolCallResult["structuredContent"]>) {
-  if (status.changedFileCount === 0) {
-    return "Измененных файлов нет.";
-  }
-
-  const visibleFiles = status.changedFiles.slice(0, 8);
-  const suffix =
-    status.changedFileCount > visibleFiles.length
-      ? `\nИ еще ${status.changedFileCount - visibleFiles.length} file(s).`
-      : "";
-
-  return [
-    `Измененные файлы (${status.changedFileCount}):`,
-    ...visibleFiles.map((file) => `- ${file.status}: ${file.path}`),
-  ].join("\n") + suffix;
-}
-
-function formatGitMcpRecentCommits(status: NonNullable<GitMcpToolCallResult["structuredContent"]>) {
-  if (status.recentCommits.length === 0) {
-    return "Последние commit(s) не вернулись.";
-  }
-
-  return [
-    "Последние commit(s):",
-    ...status.recentCommits
-      .slice(0, 5)
-      .map((commit) => `- ${commit.hash}: ${commit.subject}`),
-  ].join("\n");
-}
-
-function formatGitMcpPushStatus(status: NonNullable<GitMcpToolCallResult["structuredContent"]>) {
-  if (!status.upstream) {
-    return "Upstream для текущей ветки не настроен, поэтому MCP не может сказать, есть ли что push относительно remote.";
-  }
-
-  const ahead = status.ahead ?? 0;
-  const behind = status.behind ?? 0;
-  if (ahead > 0) {
-    return `Upstream: ${status.upstream}. Ветка ahead ${ahead}, behind ${behind}; есть commit(s), которые можно push.`;
-  }
-
-  return `Upstream: ${status.upstream}. Ветка ahead ${ahead}, behind ${behind}; новых commit(s) для push относительно upstream нет.`;
-}
-
-function formatGitMcpButtonsAnswer(result: GitMcpToolCallResult) {
-  const status = result.structuredContent;
-  const repository = status
-    ? `${gitMcpRepositoryName(status.repositoryRoot)} (${status.repositoryRoot})`
-    : "structuredContent не вернулся";
-
-  return [
-    "Кнопки в UI нужны как ручная проверка и демонстрация MCP без участия LLM.",
-    "`Refresh` в блоке MCP TOOLS проверяет discovery: какие MCP tools зарегистрированы и видны приложению.",
-    "`Run Git MCP tool` вызывает Day 17 tool `get_repository_status` и показывает raw facts: репозиторий, ветку, changed files и commits.",
-    "Чатовая часть не нажимает эти кнопки. Для MCP/status вопросов агент вызывает тот же backend helper сам, получает structuredContent и уже из него формирует ответ.",
-    `Текущая проверка MCP: connected=${result.connected}, tool=${result.toolName}, repository=${repository}.`,
-  ].join("\n");
-}
-
-function formatReadOnlyGitMcpAnswer(
-  result: GitMcpToolCallResult,
-  prompt: string,
-) {
-  if (!result.connected || !result.structuredContent) {
-    return [
-      "Не смог проверить состояние репозитория через Day 17 Git MCP tool.",
-      result.error ? `Ошибка: ${result.error}` : "MCP tool не вернул structured result.",
-    ].join("\n");
-  }
-
-  const intent = classifyGitMcpQuestion(prompt);
-  const status = result.structuredContent;
-  const latestCommit = status.recentCommits[0];
-  const repositoryName = gitMcpRepositoryName(status.repositoryRoot);
-
-  if (intent.buttons) {
-    return formatGitMcpButtonsAnswer(result);
-  }
-
-  if (
-    intent.repository &&
-    !intent.branch &&
-    !intent.workingTree &&
-    !intent.changedFiles &&
-    !intent.commits &&
-    !intent.upstream &&
-    !intent.push &&
-    !intent.broadStatus
-  ) {
-    return [
-      intent.correction
-        ? "Да, отвечаю именно про репозиторий."
-        : "Сейчас мы в таком репозитории:",
-      `\`${repositoryName}\``,
-      `Путь: \`${status.repositoryRoot}\`.`,
-      `Источник фактов: Day 17 MCP tool \`${result.toolName}\`.`,
-    ].join("\n");
-  }
-
-  if (
-    intent.mcp &&
-    !intent.repository &&
-    !intent.branch &&
-    !intent.workingTree &&
-    !intent.changedFiles &&
-    !intent.commits &&
-    !intent.upstream &&
-    !intent.push
-  ) {
-    return [
-      `Day 17 Git MCP подключен: ${result.connected ? "yes" : "no"}.`,
-      `Tool: \`${result.toolName}\`.`,
-      `Server: \`${result.serverName}\`${result.serverVersion ? ` v${result.serverVersion}` : ""}.`,
-      `Structured result получен для репозитория \`${repositoryName}\` на ветке \`${status.branch || "unknown"}\`.`,
-    ].join("\n");
-  }
-
-  const lines: string[] = [];
-  const wantsBroadOverview =
-    intent.broadStatus ||
-    (!intent.repository &&
-      !intent.branch &&
-      !intent.workingTree &&
-      !intent.changedFiles &&
-      !intent.commits &&
-      !intent.upstream &&
-      !intent.push);
-
-  if (wantsBroadOverview || intent.repository) {
-    lines.push(`Репозиторий: \`${repositoryName}\` (${status.repositoryRoot}).`);
-  }
-  if (wantsBroadOverview || intent.branch) {
-    lines.push(`Текущая ветка: \`${status.branch || "unknown"}\`.`);
-  }
-  if (wantsBroadOverview || intent.workingTree) {
-    lines.push(
-      `Рабочее дерево: ${
-        status.isClean ? "clean" : `есть ${status.changedFileCount} измененных file(s)`
-      }.`,
-    );
-  }
-  if (wantsBroadOverview || intent.upstream || intent.push) {
-    lines.push(formatGitMcpPushStatus(status));
-  }
-  if (wantsBroadOverview || intent.changedFiles) {
-    lines.push(formatGitMcpChangedFiles(status));
-  }
-  if (wantsBroadOverview || intent.commits) {
-    lines.push(formatGitMcpRecentCommits(status));
-  } else if (latestCommit && intent.branch) {
-    lines.push(`Последний commit: \`${latestCommit.hash}\` ${latestCommit.subject}.`);
-  }
-
-  lines.push(`Источник фактов: Day 17 MCP tool \`${result.toolName}\`.`);
-  return lines.join("\n");
 }
 
 function normalizeWords(text: string) {
@@ -868,7 +353,7 @@ function selectRelevantBranch(dialog: MemoryDialog, prompt: string, profileId: s
   };
 }
 
-function extractJsonObject(text: string) {
+function tryExtractJsonObject(text: string) {
   const trimmed = text.trim();
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const candidate = fenced?.[1] ?? trimmed;
@@ -876,9 +361,13 @@ function extractJsonObject(text: string) {
   const end = candidate.lastIndexOf("}");
 
   if (start === -1 || end === -1 || end <= start) {
-    return "{}";
+    return null;
   }
   return candidate.slice(start, end + 1);
+}
+
+function extractJsonObject(text: string) {
+  return tryExtractJsonObject(text) ?? "{}";
 }
 
 function extractJsonValue(text: string) {
@@ -1071,6 +560,9 @@ function parseProfileExtractorResult(answer: string) {
   }
 }
 
+// TODO(profile-suggestions): restrict profile recommendations to durable user
+// characteristics, user descriptions, and explicit personalization preferences.
+// Current extraction is too broad and can suggest ordinary task requirements.
 function buildProfileExtractorMessages(input: {
   prompt: string;
   activeProfile: UserProfile;
@@ -1248,6 +740,738 @@ function makeEmptyRequirementsContract(): RequirementsContract {
   };
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function recordValue(value: unknown, key: string): Record<string, unknown> | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const item = record[key];
+  return item && typeof item === "object" && !Array.isArray(item)
+    ? (item as Record<string, unknown>)
+    : null;
+}
+
+function stringValue(value: unknown, key: string) {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const item = record[key];
+  return typeof item === "string" && item.trim() ? item.trim() : null;
+}
+
+function numberValue(value: unknown, key: string) {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const item = record[key];
+  return typeof item === "number" && Number.isFinite(item) ? item : null;
+}
+
+function recordArrayValue(value: unknown, key: string) {
+  const record = asRecord(value);
+  if (!record) {
+    return [];
+  }
+
+  const item = record[key];
+  return Array.isArray(item)
+    ? item.filter((entry): entry is Record<string, unknown> => Boolean(asRecord(entry)))
+    : [];
+}
+
+function truncateText(value: string, limit = 3600) {
+  const normalized = value.replace(/\s+\n/g, "\n").trim();
+  return normalized.length > limit
+    ? `${normalized.slice(0, limit).trim()}\n...`
+    : normalized;
+}
+
+function parseRequestedDay(text: string) {
+  const normalized = text.trim().toLowerCase();
+  const dayMatch = normalized.match(
+    /(?:day|дн[\p{L}]*|задани[\p{L}]*)[\s:#-]*(\d{1,3})|(\d{1,3})\s*(?:day|дн[\p{L}]*)/iu,
+  );
+
+  return dayMatch ? Number.parseInt(dayMatch[1] ?? dayMatch[2], 10) : null;
+}
+
+function parseRequestedDayInAnyEncoding(text: string) {
+  const parsed = parseRequestedDay(text);
+  if (parsed) {
+    return parsed;
+  }
+
+  const normalized = text.trim().toLowerCase();
+  const dayMatch = normalized.match(
+    /(?:day|\u0434\u043d[\p{L}]*|\u0437\u0430\u0434\u0430\u043d\u0438[\p{L}]*)[\s:#-]*(\d{1,3})|(\d{1,3})\s*(?:day|\u0434\u043d[\p{L}]*)/iu,
+  );
+  return dayMatch ? Number.parseInt(dayMatch[1] ?? dayMatch[2], 10) : null;
+}
+
+function textMentionsRequestedDay(text: string, requestedDay: number | null) {
+  if (!requestedDay) {
+    return false;
+  }
+
+  const escapedDay = String(requestedDay).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `(?:day\\s*${escapedDay}|день\\s*${escapedDay}|дня\\s*${escapedDay}|задани[\\p{L}]*\\s*${escapedDay}|${escapedDay}\\s*(?:day|дн[\\p{L}]*))`,
+    "iu",
+  ).test(text);
+}
+
+function textMentionsRequestedDayInAnyEncoding(
+  text: string,
+  requestedDay: number | null,
+) {
+  if (!requestedDay) {
+    return false;
+  }
+  if (textMentionsRequestedDay(text, requestedDay)) {
+    return true;
+  }
+
+  const escapedDay = String(requestedDay).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `(?:day\\s*${escapedDay}|\\u0434\\u0435\\u043d\\u044c\\s*${escapedDay}|\\u0434\\u043d\\u044f\\s*${escapedDay}|\\u0437\\u0430\\u0434\\u0430\\u043d\\u0438[\\p{L}]*\\s*${escapedDay}|${escapedDay}\\s*(?:day|\\u0434\\u043d[\\p{L}]*))`,
+    "iu",
+  ).test(text);
+}
+
+function comparablePath(value: string | null | undefined) {
+  if (!value?.trim()) {
+    return "";
+  }
+  const normalized = path.normalize(value.trim());
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function samePath(left: string | null | undefined, right: string | null | undefined) {
+  const leftPath = comparablePath(left);
+  const rightPath = comparablePath(right);
+  return Boolean(leftPath && rightPath && leftPath === rightPath);
+}
+
+function firstStringValue(...values: Array<string | null | undefined>) {
+  return values.find((value): value is string => Boolean(value?.trim())) ?? null;
+}
+
+function isExplicitImplementationRequest(prompt: string) {
+  const normalized = prompt.trim().toLowerCase();
+  if (
+    /(?:^|\s)(implement(?:\s+this\s+plan)?|create|build|add|fix|change|update|refactor|write|code|execute(?:\s+this\s+plan)?|start\s+execution|\u0440\u0435\u0430\u043b\u0438\u0437\u0443\u0439|\u0441\u043e\u0437\u0434\u0430\u0439|\u0434\u043e\u0431\u0430\u0432\u044c|\u0438\u0441\u043f\u0440\u0430\u0432\u044c|\u043f\u043e\u043c\u0435\u043d\u044f\u0439|\u043e\u0431\u043d\u043e\u0432\u0438|\u043d\u0430\u043f\u0438\u0448\u0438|\u0441\u0434\u0435\u043b\u0430\u0439|\u0432\u044b\u043f\u043e\u043b\u043d\u0438|\u043f\u0440\u0438\u0441\u0442\u0443\u043f\u0430\u0439|\u043d\u0430\u0447\u043d\u0438|\u0437\u0430\u043f\u0443\u0441\u0442\u0438)(?:\s|$)/iu.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
+  return /(?:^|\s)(implement|create|build|add|fix|change|update|refactor|write|code|execute this plan|start execution|реализуй|создай|добавь|исправь|поменяй|обнови|напиши|сделай|выполни|приступай)(?:\s|$)/iu.test(
+    normalized,
+  );
+}
+
+function deliverableKindForPrompt(
+  prompt: string,
+  fallback: TaskDeliverableKind = "implementation_result",
+): TaskDeliverableKind {
+  if (isExplicitImplementationRequest(prompt)) {
+    return "implementation_result";
+  }
+  return fallback;
+}
+
+function workflowCacheAssignment(input: {
+  aggregateJson: Record<string, unknown> | null;
+  cacheJson: Record<string, unknown> | null;
+  requestedDay: number | null;
+}) {
+  const messages = recordArrayValue(input.cacheJson, "messages");
+  const matchingMessages = input.requestedDay
+    ? messages.filter((message) =>
+        textMentionsRequestedDayInAnyEncoding(
+          [
+            stringValue(message, "text"),
+            stringValue(message, "excerpt"),
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          input.requestedDay,
+        ),
+      )
+    : [];
+  const aggregateMarkers =
+    numberValue(input.aggregateJson, "assignmentMessages") ??
+    numberValue(recordValue(input.aggregateJson, "totals"), "dayMarkerMessages") ??
+    0;
+  const assignmentMarkerCount = input.requestedDay
+    ? matchingMessages.length
+    : aggregateMarkers;
+  const assignmentText = matchingMessages
+    .slice(0, 8)
+    .map((message) =>
+      [
+        stringValue(message, "date"),
+        stringValue(message, "author"),
+        stringValue(message, "text") ?? stringValue(message, "excerpt"),
+      ]
+        .filter(Boolean)
+        .join(" | "),
+    )
+    .filter(Boolean)
+    .join("\n");
+
+  return {
+    assignmentMarkerCount,
+    assignmentText,
+    assignmentFound:
+      assignmentMarkerCount > 0 &&
+      (!input.requestedDay || assignmentText.length > 0),
+  };
+}
+
+function isLifecycleReplanRequest(prompt: string) {
+  const normalized = prompt.trim().toLowerCase();
+  return /replan|return to planning|back to planning|check the plan|check requirements|вернись[\s\S]{0,80}план|режим планирован|проверь[\s\S]{0,80}(план|услов|требован|задани)|заново[\s\S]{0,80}план/iu.test(
+    normalized,
+  );
+}
+
+function detectWorkflowMcpPlanIntent(prompt: string): WorkflowMcpPlanIntent | null {
+  const normalized = prompt.trim().toLowerCase();
+  const wantsPlan = /\bplan\b|план/iu.test(normalized);
+  const mcpSignal =
+    /\bmcp\b|result|workflow|подтян|загруз|прочита|файл/iu.test(normalized);
+  const assignmentSignal =
+    /задани|assignment|challenge|day|дн[яеь]/iu.test(normalized);
+
+  if (!wantsPlan || !mcpSignal || !assignmentSignal) {
+    return null;
+  }
+
+  return {
+    requestedDay: parseRequestedDayInAnyEncoding(normalized),
+    wantsDialogPlan: /dialog|chat|answer|диалог|окн|ответ/iu.test(normalized),
+  };
+}
+
+function detectWorkflowMcpFollowupIntent(
+  prompt: string,
+  taskRun: TaskRun | null | undefined,
+): WorkflowMcpPlanIntent | null {
+  const externalContext = taskRun?.context.externalContext ?? "";
+  const wasWorkflowMcpTask =
+    externalContext.includes("Workflow-aware MCP external context") ||
+    /workflow-aware plan.*mcp|assignment pulled through mcp/i.test(
+      taskRun?.context.task ?? "",
+    );
+  const hasGateFailure =
+    isSemanticGateFailureText(taskRun?.context.current) ||
+    isSemanticGateFailureText(taskRun?.context.pausedReason) ||
+    taskRun?.context.requirementsContract.openQuestions.some(
+      isSemanticGateFailureText,
+    ) === true;
+  if (!wasWorkflowMcpTask || (!isLifecycleReplanRequest(prompt) && !hasGateFailure)) {
+    return null;
+  }
+
+  const requestedDay =
+    parseRequestedDayInAnyEncoding(prompt) ??
+    parseRequestedDayInAnyEncoding(taskRun?.context.task ?? "") ??
+    parseRequestedDayInAnyEncoding(externalContext);
+
+  return {
+    requestedDay,
+    wantsDialogPlan: true,
+  };
+}
+
+function detectWorkflowMcpPlanIntentUnicode(
+  prompt: string,
+): WorkflowMcpPlanIntent | null {
+  const normalized = prompt.trim().toLowerCase();
+  const wantsPlan = /\bplan\b|\u043f\u043b\u0430\u043d/iu.test(normalized);
+  const mcpSignal = /\bmcp\b|result|workflow|\u043f\u043e\u0434\u0442\u044f\u043d|\u0437\u0430\u0433\u0440\u0443\u0437|\u043f\u0440\u043e\u0447\u0438\u0442\u0430|\u0444\u0430\u0439\u043b/iu.test(
+    normalized,
+  );
+  const assignmentSignal = /assignment|challenge|day|\u0437\u0430\u0434\u0430\u043d\u0438|\u0434\u043d[\u044f\u0435\u044c]/iu.test(
+    normalized,
+  );
+
+  if (!wantsPlan || !mcpSignal || !assignmentSignal) {
+    return null;
+  }
+
+  return {
+    requestedDay: parseRequestedDayInAnyEncoding(normalized),
+    wantsDialogPlan: /dialog|chat|answer|\u0434\u0438\u0430\u043b\u043e\u0433|\u043e\u043a\u043d|\u043e\u0442\u0432\u0435\u0442/iu.test(
+      normalized,
+    ),
+  };
+}
+
+async function readTextFileIfPresent(filePath: string) {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function readJsonFileIfPresent(filePath: string) {
+  const text = await readTextFileIfPresent(filePath);
+  if (!text) {
+    return null;
+  }
+
+  return asRecord(JSON.parse(text));
+}
+
+function digestAssignmentMarkerCount(digestJson: Record<string, unknown> | null) {
+  const totals = recordValue(digestJson, "totals");
+  const counts = recordValue(digestJson, "counts");
+  return (
+    numberValue(totals, "dayMarkerMessages") ??
+    numberValue(counts, "dayMarkerMessages") ??
+    0
+  );
+}
+
+function assignmentSectionText(digestJson: Record<string, unknown> | null) {
+  const sections = recordArrayValue(digestJson, "sections");
+  const assignmentSections = sections.filter((section) =>
+    /assignment|day marker|задани|день/i.test(stringValue(section, "title") ?? ""),
+  );
+  return assignmentSections
+    .map((section) =>
+      [
+        stringValue(section, "title"),
+        stringValue(section, "summary"),
+        ...recordArrayValue(section, "messages").map((message) =>
+          [
+            stringValue(message, "date"),
+            stringValue(message, "author"),
+            stringValue(message, "excerpt") ?? stringValue(message, "text"),
+          ]
+            .filter(Boolean)
+            .join(" | "),
+        ),
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    )
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function workflowMcpAssignmentAvailability(input: {
+  assignmentMarkerCount?: number;
+  assignmentText?: string | null;
+  contextSource: "digest" | "cache" | "none";
+  currentSourcePath: string | null;
+  digestJson: Record<string, unknown> | null;
+  digestMarkdown: string | null;
+  digestPath: string | null;
+  digestSourcePath: string | null;
+  requestedDay: number | null;
+  sourcePath: string | null;
+  sourceFound?: boolean;
+  staleDigest: boolean;
+}): WorkflowMcpAssignmentAvailability {
+  const sourceFound =
+    input.sourceFound ??
+    Boolean(input.digestJson || input.digestMarkdown || input.assignmentText);
+  const assignmentMarkerCount =
+    input.assignmentMarkerCount ?? digestAssignmentMarkerCount(input.digestJson);
+  const assignmentText = [
+    assignmentSectionText(input.digestJson),
+    input.digestMarkdown ?? "",
+    input.assignmentText ?? "",
+  ].join("\n");
+  const requestedDayFound = input.requestedDay
+    ? textMentionsRequestedDayInAnyEncoding(assignmentText, input.requestedDay)
+    : assignmentMarkerCount > 0;
+  const assignmentFound =
+    sourceFound && assignmentMarkerCount > 0 && requestedDayFound;
+  const dayLabel = input.requestedDay
+    ? `Day ${input.requestedDay}`
+    : "the requested day";
+  const sourceLabel =
+    input.contextSource === "cache"
+      ? "fresh scheduler cache"
+      : input.contextSource === "digest"
+        ? "MCP digest"
+        : "current MCP context";
+  const reason = !sourceFound
+    ? input.staleDigest
+      ? "The saved MCP digest is stale for the current scheduler source, and no fresh scheduler cache/result is available."
+      : "No saved MCP digest/result was found."
+    : assignmentFound
+      ? `${dayLabel} assignment marker was found in the ${sourceLabel}.`
+      : `${dayLabel} assignment was not found in the ${sourceLabel}; ${assignmentMarkerCount} assignment/day marker message(s) were selected.`;
+
+  return {
+    requestedDay: input.requestedDay,
+    sourcePath: input.sourcePath,
+    digestPath: input.digestPath,
+    currentSourcePath: input.currentSourcePath,
+    digestSourcePath: input.digestSourcePath,
+    contextSource: input.contextSource,
+    staleDigest: input.staleDigest,
+    sourceFound,
+    assignmentFound,
+    assignmentMarkerCount,
+    reason,
+    status: !sourceFound ? "source_unavailable" : assignmentFound ? "found" : "missing",
+  };
+}
+
+function formatWorkflowMcpUnavailableMessage(input: {
+  assignmentAvailability: WorkflowMcpAssignmentAvailability;
+  statusError: string | null;
+}) {
+  const availability = input.assignmentAvailability;
+  if (!availability.sourceFound && availability.staleDigest) {
+    return [
+      "I cannot build the requested workflow-aware MCP plan yet because the latest digest is stale for the current scheduler source.",
+      `Requested day: ${availability.requestedDay ?? "not specified"}`,
+      `Current source: ${availability.currentSourcePath ?? "unknown"}`,
+      `Digest source: ${availability.digestSourcePath ?? "unknown"}`,
+      `Digest: ${availability.digestPath ?? "unknown"}`,
+      `Context source: ${availability.contextSource}`,
+      "Run now / refresh workflow so the scheduler cache and Day 19 digest are rebuilt from the current result.json, then ask for the plan again.",
+    ].join("\n");
+  }
+
+  if (availability.sourceFound && !availability.assignmentFound) {
+    return [
+      "I cannot build the requested workflow-aware MCP plan yet because the MCP source was read, but the requested assignment was not found.",
+      `Requested day: ${availability.requestedDay ?? "not specified"}`,
+      `Current source: ${availability.currentSourcePath ?? "unknown"}`,
+      `Source result: ${availability.sourcePath ?? "unknown"}`,
+      `Digest source: ${availability.digestSourcePath ?? "unknown"}`,
+      `Digest: ${availability.digestPath ?? "unknown"}`,
+      `Digest freshness: ${availability.staleDigest ? "stale" : "fresh"}`,
+      `Context source: ${availability.contextSource}`,
+      `Assignment markers found: ${availability.assignmentMarkerCount}`,
+      `Reason: ${availability.reason}`,
+      "Refresh or point MCP to the result.json export that contains the Day 21 assignment, then ask for the plan again.",
+    ].join("\n");
+  }
+
+  return [
+    "I cannot build the requested workflow-aware MCP plan yet because no saved MCP workflow/digest/result is available.",
+    input.statusError ? `MCP status error: ${input.statusError}` : null,
+    `Current source: ${availability.currentSourcePath ?? "unknown"}`,
+    `Digest source: ${availability.digestSourcePath ?? "unknown"}`,
+    "Run now / refresh workflow so the saved MCP result is rebuilt from the current export, then ask for the plan again.",
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+}
+
+function workflowMcpPlanContract(input: {
+  assignmentAvailability: WorkflowMcpAssignmentAvailability;
+  intent: WorkflowMcpPlanIntent;
+  sourcePath: string | null;
+}) {
+  const dayLabel = input.intent.requestedDay
+    ? `day ${input.intent.requestedDay}`
+    : "the requested day";
+  const sourceLabel = input.sourcePath
+    ? ` from ${input.sourcePath}`
+    : " from the latest saved MCP result";
+
+  return {
+    goal: `Show a workflow-aware plan for ${dayLabel} assignment pulled through MCP.`,
+    targetLocation: "assistant dialog",
+    requirements: [
+      `Use the latest saved MCP workflow/digest/result${sourceLabel}.`,
+      "Extract the assignment requirements from the MCP context.",
+      "Return the assignment requirements and an ordered implementation plan in the dialog.",
+      "Keep lifecycle workflow rules active; do not execute implementation without explicit approval.",
+    ],
+    constraints: [
+      "Workflow lifecycle remains the primary orchestration layer.",
+      "Use only read-only MCP/context loading during Planning.",
+      "Do not run mutating MCP workflow actions from chat without lifecycle approval or a proper UI/scheduled trigger.",
+    ],
+    assumptions: [
+      "The user is asking for a planning artifact, not immediate implementation.",
+      input.intent.wantsDialogPlan
+        ? "The requested delivery location is the assistant dialog."
+        : "The plan should be shown in the assistant dialog.",
+    ],
+    acceptanceCriteria: [
+      "The response includes the source MCP artifact or saved result used.",
+      "The response lists concrete assignment requirements.",
+      "The response provides ordered steps for implementation.",
+      "The response waits for explicit approval before Execution.",
+    ],
+    openQuestions: input.assignmentAvailability.assignmentFound
+      ? []
+      : [
+          input.assignmentAvailability.sourceFound
+            ? input.assignmentAvailability.reason
+            : "The latest saved MCP workflow/digest/result is unavailable; run the read-only workflow/status or refresh the Day 20 Workflow panel first.",
+        ],
+    readyForApproval: input.assignmentAvailability.assignmentFound,
+    updatedAt: new Date().toISOString(),
+  } satisfies RequirementsContract;
+}
+
+function formatWorkflowMcpExternalContext(input: {
+  contextText: string | null;
+  deliverableKind: TaskDeliverableKind;
+  intent: WorkflowMcpPlanIntent;
+  digestJson: Record<string, unknown> | null;
+  digestMarkdown: string | null;
+  digestPath: string | null;
+  sourcePath: string | null;
+  assignmentAvailability: WorkflowMcpAssignmentAvailability;
+}) {
+  const digestTitle =
+    stringValue(input.digestJson, "title") ?? "Latest challenge digest";
+  const digestSummaryText = stringValue(input.digestJson, "summary");
+  const digestText = input.contextText ?? input.digestMarkdown ?? "";
+  const resultKind =
+    input.deliverableKind === "planning_artifact"
+      ? "planning artifact"
+      : "implementation";
+
+  return [
+    "Workflow-aware MCP external context:",
+    `Requested day: ${input.intent.requestedDay ?? "not specified"}`,
+    `Context mode: read-only scheduler cache/result`,
+    `Task result kind: ${resultKind}`,
+    `Available: ${input.assignmentAvailability.sourceFound ? "yes" : "no"}`,
+    `Source: ${input.sourcePath ?? "latest saved MCP workflow/digest result"}`,
+    `Current source: ${input.assignmentAvailability.currentSourcePath ?? "unknown"}`,
+    `Digest source: ${input.assignmentAvailability.digestSourcePath ?? "unknown"}`,
+    `Digest freshness: ${
+      input.assignmentAvailability.digestPath
+        ? input.assignmentAvailability.staleDigest
+          ? "stale"
+          : "fresh"
+        : "unknown"
+    }`,
+    `Context source: ${input.assignmentAvailability.contextSource}`,
+    `Assignment status: ${input.assignmentAvailability.status}`,
+    `Assignment markers: ${input.assignmentAvailability.assignmentMarkerCount}`,
+    `Assignment reason: ${input.assignmentAvailability.reason}`,
+    input.digestPath ? `Digest path: ${input.digestPath}` : null,
+    digestTitle ? `Digest title: ${digestTitle}` : null,
+    digestSummaryText ? `Digest summary: ${digestSummaryText}` : null,
+    digestText ? `Digest/result excerpt:\n${truncateText(digestText)}` : null,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+}
+
+async function loadWorkflowMcpPlanningContext(
+  prompt: string,
+  taskRun?: TaskRun | null,
+): Promise<WorkflowMcpPlanningContext | null> {
+  const intent =
+    detectWorkflowMcpPlanIntent(prompt) ??
+    detectWorkflowMcpPlanIntentUnicode(prompt) ??
+    detectWorkflowMcpFollowupIntent(prompt, taskRun);
+  if (!intent) {
+    return null;
+  }
+
+  let schedulerIndex: Record<string, unknown> | null = null;
+  let statusError: string | null = null;
+  try {
+    schedulerIndex = await readJsonFileIfPresent(DEFAULT_SCHEDULER_INDEX_FILE);
+  } catch (error) {
+    statusError =
+      error instanceof Error ? error.message : "Scheduler index load failed.";
+  }
+
+  const dataRoot = stringValue(schedulerIndex, "dataRoot") ?? DEFAULT_WORKFLOW_DATA_ROOT;
+  const latestDigestMarkdownPath = path.join(
+    dataRoot,
+    "briefings",
+    "digests",
+    "latest-challenge-digest.md",
+  );
+  const latestDigestJsonPath = path.join(
+    dataRoot,
+    "briefings",
+    "digests",
+    "latest-challenge-digest.json",
+  );
+  const messagesCachePath = path.join(
+    dataRoot,
+    "briefings",
+    "messages-cache.json",
+  );
+  const latestAggregatePath = path.join(
+    dataRoot,
+    "briefings",
+    "latest-aggregate.json",
+  );
+  const schedulerTasksPath = path.join(dataRoot, "scheduler", "tasks.json");
+  const digestMarkdown = await readTextFileIfPresent(latestDigestMarkdownPath);
+  const digestJson = await readJsonFileIfPresent(latestDigestJsonPath);
+  const cacheJson = await readJsonFileIfPresent(messagesCachePath);
+  const aggregateJson = await readJsonFileIfPresent(latestAggregatePath);
+  const schedulerState = await readJsonFileIfPresent(schedulerTasksPath);
+  const cacheSource = recordValue(cacheJson, "source");
+  const schedulerSource = recordValue(schedulerState, "source");
+  const firstTask = recordArrayValue(schedulerState, "tasks")[0];
+  const taskArgs = recordValue(firstTask, "args");
+  const taskSource = recordValue(taskArgs, "source");
+  const currentSourcePath = firstStringValue(
+    stringValue(schedulerSource, "path"),
+    stringValue(taskSource, "path"),
+    stringValue(cacheSource, "path"),
+    stringValue(aggregateJson, "sourcePath"),
+  );
+  const digestSourcePath = firstStringValue(
+    stringValue(digestJson, "sourcePath"),
+  );
+  const cacheSourcePath = stringValue(cacheSource, "path");
+  const aggregateSourcePath = stringValue(aggregateJson, "sourcePath");
+  const freshCacheAvailable = Boolean(
+    cacheJson &&
+      currentSourcePath &&
+      (samePath(cacheSourcePath, currentSourcePath) ||
+        samePath(aggregateSourcePath, currentSourcePath)),
+  );
+  const digestSourceMismatch = Boolean(
+    (digestJson || digestMarkdown) &&
+      currentSourcePath &&
+      digestSourcePath &&
+      !samePath(digestSourcePath, currentSourcePath),
+  );
+  const digestPath =
+    digestJson ? latestDigestJsonPath : digestMarkdown ? latestDigestMarkdownPath : null;
+  const cacheAssignment = freshCacheAvailable
+    ? workflowCacheAssignment({
+        aggregateJson,
+        cacheJson,
+        requestedDay: intent.requestedDay,
+      })
+    : {
+        assignmentFound: false,
+        assignmentMarkerCount: 0,
+        assignmentText: "",
+      };
+  const digestAvailability = workflowMcpAssignmentAvailability({
+    contextSource: "digest",
+    currentSourcePath,
+    digestJson,
+    digestMarkdown,
+    digestPath,
+    digestSourcePath,
+    requestedDay: intent.requestedDay,
+    sourceFound: Boolean((digestJson || digestMarkdown) && !digestSourceMismatch),
+    sourcePath: digestSourcePath,
+    staleDigest: digestSourceMismatch,
+  });
+  const digestStaleByContent = Boolean(
+    !digestSourceMismatch &&
+      (digestJson || digestMarkdown) &&
+      cacheAssignment.assignmentFound &&
+      !digestAvailability.assignmentFound,
+  );
+  const staleDigest = digestSourceMismatch || digestStaleByContent;
+  const contextSource: WorkflowMcpAssignmentAvailability["contextSource"] =
+    !staleDigest && digestAvailability.assignmentFound
+      ? "digest"
+      : freshCacheAvailable &&
+          (cacheAssignment.assignmentFound ||
+            staleDigest ||
+            !digestAvailability.sourceFound)
+        ? "cache"
+        : !staleDigest && digestAvailability.sourceFound
+          ? "digest"
+          : "none";
+  const usingCache = contextSource === "cache";
+  const usingDigest = contextSource === "digest";
+  const activeDigestJson = usingDigest ? digestJson : null;
+  const activeDigestMarkdown = usingDigest ? digestMarkdown : null;
+  const activeSourcePath = usingCache
+    ? currentSourcePath
+    : usingDigest
+      ? digestSourcePath
+      : null;
+  const contextAvailable = usingCache || usingDigest;
+  const assignmentAvailability = workflowMcpAssignmentAvailability({
+    assignmentMarkerCount: usingCache
+      ? cacheAssignment.assignmentMarkerCount
+      : undefined,
+    assignmentText: usingCache ? cacheAssignment.assignmentText : null,
+    contextSource,
+    currentSourcePath,
+    digestJson: activeDigestJson,
+    digestMarkdown: activeDigestMarkdown,
+    digestPath,
+    digestSourcePath,
+    requestedDay: intent.requestedDay,
+    sourceFound: contextAvailable,
+    sourcePath: activeSourcePath,
+    staleDigest,
+  });
+  const available = contextAvailable && assignmentAvailability.assignmentFound;
+  const assignmentText = usingCache
+    ? cacheAssignment.assignmentText
+    : [
+        assignmentSectionText(activeDigestJson),
+        activeDigestMarkdown ?? "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+  const deliverableKind = deliverableKindForPrompt(prompt, "planning_artifact");
+  const contract = workflowMcpPlanContract({
+    assignmentAvailability,
+    intent,
+    sourcePath: contextAvailable ? activeSourcePath : currentSourcePath,
+  });
+  const unavailableMessage = available
+    ? null
+    : formatWorkflowMcpUnavailableMessage({
+        assignmentAvailability,
+        statusError,
+      });
+
+  return {
+    available,
+    contract,
+    externalContext: formatWorkflowMcpExternalContext({
+      contextText: usingCache ? cacheAssignment.assignmentText : null,
+      deliverableKind,
+      intent,
+      digestJson: activeDigestJson,
+      digestMarkdown: activeDigestMarkdown,
+      digestPath,
+      sourcePath: contextAvailable ? activeSourcePath : currentSourcePath,
+      assignmentAvailability,
+    }),
+    sourcePath: contextAvailable ? activeSourcePath : currentSourcePath,
+    assignmentText: assignmentText || null,
+    deliverableKind,
+    assignmentAvailability,
+    unavailableMessage,
+  };
+}
+
 function isUnknownContractValue(value: string) {
   return /^(unknown|not specified|unspecified|not provided|n\/a|none|null|tbd|to be determined|-+)$/i.test(
     value.trim(),
@@ -1413,12 +1637,16 @@ function formatTaskContextForPrompt(taskRun: TaskRun | null) {
     "Task context:",
     `Task: ${context.task}`,
     `State: ${context.state}`,
+    `Deliverable kind: ${context.deliverableKind}`,
     `Step: ${context.step}/${context.total}`,
     `Current: ${context.current || "- empty"}`,
     `Plan: ${context.plan.length ? context.plan.map((item) => `- ${item}`).join("\n") : "- empty"}`,
     `Done: ${context.done.length ? context.done.map((item) => `- ${item}`).join("\n") : "- empty"}`,
     `Paused reason: ${context.pausedReason || "- none"}`,
     `Awaiting plan approval: ${context.awaitingPlanApproval ? "yes" : "no"}`,
+    context.externalContext
+      ? `External context:\n${truncateText(context.externalContext, 2200)}`
+      : "External context: - none",
     formatRequirementsContract(context.requirementsContract),
   ].join("\n");
 }
@@ -1453,6 +1681,7 @@ function buildStageLocalContext(input: {
     "Stage-local task context:",
     `Original user request for reference only; it may be written in any language: ${context.task}`,
     `Current stage: ${input.stage}`,
+    `Deliverable kind: ${context.deliverableKind}`,
     `Lifecycle step: ${TASK_STAGE_ORDER[input.stage]}/${TASK_LIFECYCLE_STATES.length}`,
     `Awaiting plan approval: ${context.awaitingPlanApproval ? "yes" : "no"}`,
     `Allowed neighboring transitions: ${
@@ -1460,6 +1689,9 @@ function buildStageLocalContext(input: {
         ? allowedTransitions.map((target) => `${input.stage} -> ${target}`).join(", ")
         : "none"
     }`,
+    context.externalContext
+      ? `External context:\n${truncateText(context.externalContext, 2200)}`
+      : "External context: - none",
     "State ownership: do not change lifecycle state or claim completion. Return only your JSON schema; the orchestrator owns transitions.",
   ];
 
@@ -1529,6 +1761,17 @@ function taskInvariantsForRun(taskRun: TaskRun) {
   return taskRun.taskInvariants;
 }
 
+function allTaskInvariantRefs(taskRun: TaskRun, pendingTaskInvariants: TaskInvariant[]) {
+  return uniqueStrings(
+    [
+      ...taskRun.invariantRefs,
+      ...taskRun.taskInvariants.map((invariant) => invariant.id),
+      ...pendingTaskInvariants.map((invariant) => invariant.id),
+    ],
+    24,
+  );
+}
+
 function buildTaskInvariant(input: {
   title: string;
   description: string;
@@ -1578,6 +1821,16 @@ function isArchitectureInvariantDuplicate(
     "must not move to done until validation has passed",
     "file backed memory boundaries",
     "short term memory in json",
+    "lifecycle workflow priority",
+    "workflow lifecycle",
+    "explicit approval",
+    "plan approval",
+    "before execution",
+    "read only mcp",
+    "mutating mcp",
+    "mcp context policy",
+    "orchestrator",
+    "user acceptance",
   ];
 
   return architectureSignals.some((signal) => text.includes(signal));
@@ -1604,6 +1857,14 @@ function isExplicitPlanApproval(prompt: string) {
   const normalized = prompt.trim().toLowerCase();
   if (!normalized) {
     return false;
+  }
+
+  if (
+    /^(approve|approved|confirm|confirmed|proceed|go ahead|start execution|execute|looks good|ok|okay|yes|ship it|\u043f\u0440\u0438\u043d\u0438\u043c\u0430\u044e|\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u044e|\u0441\u043e\u0433\u043b\u0430\u0441\u0435\u043d|\u0441\u043e\u0433\u043b\u0430\u0441\u043d\u0430|\u0443\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u044e|\u043e\u0434\u043e\u0431\u0440\u044f\u044e|\u043c\u043e\u0436\u043d\u043e|\u043d\u0430\u0447\u0438\u043d\u0430\u0439|\u043f\u0440\u0438\u0441\u0442\u0443\u043f\u0430\u0439|\u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0439|\u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0439|\u0434\u0430|\u043e\u043a|\u0445\u043e\u0440\u043e\u0448\u043e)([\s.!?,;:]+.*)?$/iu.test(
+      normalized,
+    )
+  ) {
+    return true;
   }
 
   return /^(approve|approved|confirm|confirmed|proceed|go ahead|start execution|execute|looks good|ok|okay|yes|ship it|принимаю|подтверждаю|согласен|согласна|утверждаю|одобряю|можно|начинай|приступай|выполняй|запускай|да|ок|хорошо)([\s.!?,;:]+.*)?$/iu.test(
@@ -1638,6 +1899,68 @@ function buildPlanApprovalQuestion(
   ].join("\n");
 }
 
+function buildPlanningArtifactAnswer(input: {
+  plan: string[];
+  requirementsContract: RequirementsContract;
+  workflowMcpPlanningContext?: WorkflowMcpPlanningContext | null;
+}) {
+  const assignmentText =
+    input.workflowMcpPlanningContext?.assignmentText?.trim() ?? "";
+  const availability = input.workflowMcpPlanningContext?.assignmentAvailability;
+  const sourcePath =
+    input.workflowMcpPlanningContext?.sourcePath ??
+    availability?.sourcePath ??
+    availability?.currentSourcePath ??
+    null;
+  const digestFreshness = availability?.digestPath
+    ? availability.staleDigest
+      ? "stale"
+      : "fresh"
+    : "unknown";
+  const assignmentSignals = [
+    assignmentText,
+    ...input.requirementsContract.requirements,
+  ]
+    .join("\n")
+    .toLowerCase();
+  const indexingPlan =
+    /embedding|faiss|sqlite|chunk|readme|pdf|index/i.test(assignmentSignals)
+      ? [
+          "Collect the required corpus: README files, articles, code, and PDFs converted to text, with an expected size of roughly 20-30 pages.",
+          "Normalize extracted text and preserve source metadata before indexing.",
+          "Implement fixed-size chunking with stable chunk ids.",
+          "Implement structure-aware chunking by headings, sections, and file boundaries.",
+          "Generate embeddings for every chunk.",
+          "Persist the local index in the selected storage format: FAISS, SQLite, or JSON.",
+          "Store metadata for every chunk: source, title or file, section, and chunk_id.",
+          "Compare fixed-size and structure-aware chunking quality on the same corpus.",
+          "Prepare the final code and a short video/demo showing the local index working.",
+        ]
+      : input.plan;
+  const plan = indexingPlan.length ? indexingPlan : input.plan;
+
+  return [
+    "Planning artifact is ready. Execution is not started.",
+    sourcePath ? `Source: ${sourcePath}` : null,
+    availability
+      ? `MCP context: ${availability.contextSource}; digest ${digestFreshness}; assignment ${availability.status}; markers ${availability.assignmentMarkerCount}`
+      : null,
+    availability?.reason ? `MCP status: ${availability.reason}` : null,
+    "",
+    "Assignment requirements:",
+    assignmentText
+      ? truncateText(assignmentText, 5000)
+      : formatRequirementsContract(input.requirementsContract),
+    "",
+    "Implementation plan:",
+    plan.length
+      ? plan.map((item, index) => `${index + 1}. ${item}`).join("\n")
+      : "- empty",
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+}
+
 function buildUserAcceptanceQuestion(
   executionDraft: string,
   validationResult: ValidationResult,
@@ -1661,6 +1984,7 @@ function createInitialTaskRun(prompt: string): TaskRun {
       id: makeMemoryLayerId("task-run"),
       task: prompt,
       state: "planning",
+      deliverableKind: deliverableKindForPrompt(prompt),
       step: 1,
       total: TASK_LIFECYCLE_STATES.length,
       plan: [],
@@ -1669,11 +1993,13 @@ function createInitialTaskRun(prompt: string): TaskRun {
       pausedReason: null,
       awaitingPlanApproval: false,
       requirementsContract: makeEmptyRequirementsContract(),
+      externalContext: null,
       startedAt: now,
       updatedAt: now,
     },
     invariantRefs: [],
     taskInvariants: [],
+    pendingTaskInvariants: [],
     artifacts: [],
     agentRuns: [],
     swarmRuns: [],
@@ -1824,7 +2150,14 @@ function normalizeExecutionAgentResult(value: unknown): ExecutionAgentResult {
 
 function parseExecutionAgentResult(answer: string) {
   try {
-    return normalizeExecutionAgentResult(JSON.parse(extractJsonObject(answer)));
+    const jsonObject = tryExtractJsonObject(answer);
+    if (!jsonObject) {
+      return normalizeExecutionAgentResult({
+        answerDraft: answer,
+        confidence: 0.4,
+      });
+    }
+    return normalizeExecutionAgentResult(JSON.parse(jsonObject));
   } catch {
     return normalizeExecutionAgentResult({ answerDraft: answer, confidence: 0.4 });
   }
@@ -2099,24 +2432,18 @@ function taskLabelFromContract(contract: RequirementsContract, fallback: string)
   return contract.goal.trim() || fallback.trim() || "Untitled task";
 }
 
-function removeSemanticGateFailureQuestions(contract: RequirementsContract) {
-  const openQuestions = contract.openQuestions.filter(
-    (question) => !isSemanticGateFailureText(question),
-  );
-
-  if (openQuestions.length === contract.openQuestions.length) {
-    return contract;
+function prepareTaskRunForPlanningTurn(taskRun: TaskRun, prompt: string): TaskRun {
+  if (isLifecycleReplanRequest(prompt)) {
+    const nextTaskRun = createInitialTaskRun(prompt || taskRun.context.task);
+    return {
+      ...nextTaskRun,
+      context: {
+        ...nextTaskRun.context,
+        externalContext: taskRun.context.externalContext,
+      },
+    };
   }
 
-  return {
-    ...contract,
-    openQuestions,
-    readyForApproval: false,
-    updatedAt: new Date().toISOString(),
-  };
-}
-
-function prepareTaskRunForPlanningTurn(taskRun: TaskRun, prompt: string): TaskRun {
   if (taskRun.context.state !== "planning") {
     return taskRun;
   }
@@ -2126,14 +2453,15 @@ function prepareTaskRunForPlanningTurn(taskRun: TaskRun, prompt: string): TaskRu
     isSemanticGateFailureText(context.current) ||
     isSemanticGateFailureText(context.pausedReason) ||
     context.requirementsContract.openQuestions.some(isSemanticGateFailureText);
-  const requirementsContract = hadGateFailure
-    ? removeSemanticGateFailureQuestions(context.requirementsContract)
-    : context.requirementsContract;
+  if (hadGateFailure) {
+    return createInitialTaskRun(prompt || context.task);
+  }
+
+  const requirementsContract = context.requirementsContract;
   const task = taskLabelFromContract(requirementsContract, prompt || context.task);
 
   if (
     task === context.task &&
-    !hadGateFailure &&
     requirementsContract === context.requirementsContract
   ) {
     return taskRun;
@@ -2144,14 +2472,39 @@ function prepareTaskRunForPlanningTurn(taskRun: TaskRun, prompt: string): TaskRu
     context: {
       ...context,
       task,
-      current: hadGateFailure
-        ? "User provided new planning input. Rebuild the plan from the current request and requirements."
-        : context.current,
-      pausedReason: hadGateFailure ? null : context.pausedReason,
+      current: context.current,
+      pausedReason: context.pausedReason,
       requirementsContract,
+      externalContext: context.externalContext,
       updatedAt: new Date().toISOString(),
     },
     updatedAt: new Date().toISOString(),
+  };
+}
+
+function seedWorkflowMcpPlanningTaskRun(
+  taskRun: TaskRun,
+  context: WorkflowMcpPlanningContext,
+): TaskRun {
+  const now = new Date().toISOString();
+  return {
+    ...taskRun,
+    context: {
+      ...taskRun.context,
+      task: taskLabelFromContract(context.contract, taskRun.context.task),
+      current: context.available
+        ? "Build a workflow-aware MCP planning artifact from read-only saved context."
+        : context.unavailableMessage ?? "Waiting for saved MCP context.",
+      pausedReason: context.available
+        ? null
+        : context.unavailableMessage ?? "Saved MCP context is unavailable.",
+      awaitingPlanApproval: false,
+      deliverableKind: context.deliverableKind,
+      requirementsContract: context.contract,
+      externalContext: context.externalContext,
+      updatedAt: now,
+    },
+    updatedAt: now,
   };
 }
 
@@ -2257,6 +2610,7 @@ function buildStageMessages(input: {
           validationResult: input.validationResult,
         }),
         formatInvariantsForPrompt(input.invariants),
+        WORKFLOW_MCP_CONTEXT_POLICY,
         input.extraContext || "",
       ].join("\n\n"),
     },
@@ -2280,6 +2634,7 @@ async function runPlanningSwarm(input: {
   workingMemory: MemoryLayerNote[];
   longTermMemory: MemoryLayerNote[];
   gitMcpContext?: string | null;
+  externalContext?: string | null;
 }) {
   const agents = [
     {
@@ -2326,7 +2681,11 @@ async function runPlanningSwarm(input: {
             "- Do not invent high-impact unknowns. Put them in openQuestions.",
             "- readyForApproval can be true only when goal, target/location, concrete requirements, acceptance criteria, and openQuestions are complete.",
             "- The orchestrator will not enter Execution until this contract is complete and the user explicitly approves the plan.",
+            "- For workflow-aware MCP plan requests, use read-only MCP context as source material inside Planning.",
+            "- If the requested deliverable is a plan shown in chat, targetLocation='assistant dialog' is complete.",
+            "- Mutating MCP workflow actions can be planned here but require lifecycle approval or the proper UI/scheduled trigger before they run.",
           ].join("\n"),
+          input.externalContext || "",
           input.gitMcpContext || "",
         ]
           .filter(Boolean)
@@ -2356,6 +2715,31 @@ async function runPlanningSwarm(input: {
     outputs.flatMap((output) => output.parsed.plan),
     6,
   );
+  const planningOnlyArtifact =
+    input.taskRun.context.deliverableKind === "planning_artifact";
+  const effectivePlan = plan.length
+    ? plan
+    : input.externalContext
+      ? planningOnlyArtifact
+        ? [
+            "Review the latest saved MCP workflow/digest context.",
+            "Extract the assignment requirements and source references.",
+            "Map each requirement to concrete implementation steps.",
+            "Present the requirements and plan in the assistant dialog.",
+          ]
+        : [
+            "Review the latest saved MCP workflow/digest context.",
+            "Extract the assignment requirements and source references.",
+            "Map each requirement to concrete implementation steps.",
+            "Present the requirements and plan in the assistant dialog.",
+            "Wait for explicit approval before any implementation or mutating MCP action.",
+          ]
+      : [
+          "Clarify the task goal and constraints.",
+          "Prepare a focused answer or artifact.",
+          "Validate the result against active invariants.",
+          "Request user acceptance before finalizing.",
+        ];
   const findings = uniqueStrings(
     outputs.flatMap((output) => output.parsed.findings),
     10,
@@ -2373,37 +2757,56 @@ async function runPlanningSwarm(input: {
       severity: severity === "warning" ? "warning" : "blocker",
     });
   });
+  const seededContract = input.taskRun.context.requirementsContract
+    .readyForApproval
+    ? input.taskRun.context.requirementsContract
+    : null;
   const requirementsContract = mergeRequirementsContracts(
-    outputs.map((output) => output.parsed.requirementsContract),
+    [
+      ...(seededContract ? [seededContract] : []),
+      ...outputs.map((output) => output.parsed.requirementsContract),
+    ],
   );
+  const finalRequirementsContract = seededContract
+    ? {
+        ...requirementsContract,
+        openQuestions: [],
+        readyForApproval: true,
+        updatedAt: new Date().toISOString(),
+      }
+    : requirementsContract;
   const agentQuestion =
     outputs.find((output) => output.parsed.question)?.parsed.question ?? null;
   const contractQuestion =
-    !requirementsContract.readyForApproval &&
-    requirementsContract.openQuestions.length
-    ? [
-        "I need to stay in Planning before Execution because the requirements contract is incomplete.",
-        "",
-        "Open questions:",
-        ...requirementsContract.openQuestions.map((question, index) => `${index + 1}. ${question}`),
-      ].join("\n")
-    : null;
-  const needsUserInput = !requirementsContract.readyForApproval;
+    !finalRequirementsContract.readyForApproval &&
+    finalRequirementsContract.openQuestions.length
+      ? [
+          "I need to stay in Planning before Execution because the requirements contract is incomplete.",
+          "",
+          "Open questions:",
+          ...finalRequirementsContract.openQuestions.map((question, index) => `${index + 1}. ${question}`),
+        ].join("\n")
+      : null;
+  const needsUserInput = !finalRequirementsContract.readyForApproval;
   const question = needsUserInput ? contractQuestion ?? agentQuestion : null;
   const planningFindings = uniqueStrings(
     [
       ...findings,
-      ...requirementsContract.openQuestions.map(
+      ...finalRequirementsContract.openQuestions.map(
         (question) => `Open requirement question: ${question}`,
       ),
     ],
     12,
   );
   const aggregatedDecision = [
-    `Plan: ${plan.length ? plan.join(" -> ") : "fallback plan required"}`,
-    formatRequirementsContract(requirementsContract),
+    `Plan: ${effectivePlan.join(" -> ")}`,
+    formatRequirementsContract(finalRequirementsContract),
     `Findings: ${planningFindings.length ? planningFindings.join("; ") : "no special findings"}`,
-    needsUserInput ? `Needs user input: ${question || "yes"}` : "Ready for execution.",
+    needsUserInput
+      ? `Needs user input: ${question || "yes"}`
+      : planningOnlyArtifact
+        ? "Ready for planning artifact response."
+        : "Ready for execution.",
   ].join("\n");
   const swarmRun: SwarmRun = {
     id: makeMemoryLayerId("swarm-run"),
@@ -2415,15 +2818,8 @@ async function runPlanningSwarm(input: {
   };
 
   return {
-    plan: plan.length
-      ? plan
-      : [
-          "Clarify the task goal and constraints.",
-          "Prepare a focused answer or artifact.",
-          "Validate the result against active invariants.",
-          "Request user acceptance before finalizing.",
-    ],
-    requirementsContract,
+    plan: effectivePlan,
+    requirementsContract: finalRequirementsContract,
     taskInvariants,
     needsUserInput,
     question,
@@ -2649,7 +3045,9 @@ function updateTaskContext(input: {
   current: string;
   pausedReason?: string | null;
   awaitingPlanApproval?: boolean;
+  deliverableKind?: TaskDeliverableKind;
   requirementsContract?: RequirementsContract;
+  externalContext?: string | null;
 }) {
   const now = new Date().toISOString();
   return {
@@ -2664,8 +3062,14 @@ function updateTaskContext(input: {
     pausedReason: input.pausedReason ?? null,
     awaitingPlanApproval:
       input.awaitingPlanApproval ?? input.taskRun.context.awaitingPlanApproval,
+    deliverableKind:
+      input.deliverableKind ?? input.taskRun.context.deliverableKind,
     requirementsContract:
       input.requirementsContract ?? input.taskRun.context.requirementsContract,
+    externalContext:
+      input.externalContext === undefined
+        ? input.taskRun.context.externalContext
+        : input.externalContext,
     updatedAt: now,
   };
 }
@@ -2767,6 +3171,7 @@ async function runTaskOrchestration(input: {
   currentProfileSuggestionCount: number;
   shortTermFilePath: string;
   gitMcpContext?: string | null;
+  workflowMcpPlanningContext?: WorkflowMcpPlanningContext | null;
 }): Promise<TaskOrchestrationResult> {
   let taskRun = prepareTaskRunForPlanningTurn(input.initialTaskRun, input.prompt);
   const events: MemoryLayerEvent[] = [];
@@ -2776,12 +3181,120 @@ async function runTaskOrchestration(input: {
   const artifacts: StageArtifact[] = [];
   const availableInvariants = input.globalInvariants;
   let validationResult: ValidationResult | null = null;
-  const planApprovalGranted =
+  if (input.workflowMcpPlanningContext) {
+    taskRun = seedWorkflowMcpPlanningTaskRun(
+      taskRun,
+      input.workflowMcpPlanningContext,
+    );
+
+    if (!input.workflowMcpPlanningContext.available) {
+      const reason =
+        input.workflowMcpPlanningContext.unavailableMessage ??
+        "Saved MCP workflow context is unavailable.";
+      const pauseTransition = makeTransitionDecision("planning", "planning", reason);
+      transitions.push(pauseTransition);
+      taskRun = {
+        ...taskRun,
+        transitions: [...taskRun.transitions, pauseTransition],
+        context: updateTaskContext({
+          taskRun,
+          state: "planning",
+          plan: [],
+          current: reason,
+          pausedReason: reason,
+          awaitingPlanApproval: false,
+          requirementsContract: input.workflowMcpPlanningContext.contract,
+        }),
+        updatedAt: new Date().toISOString(),
+      };
+      events.push(...taskEvents({
+        taskRun,
+        transitions,
+        agentRuns,
+        swarmRuns,
+        validationResult,
+        filePath: input.shortTermFilePath,
+      }));
+      events.push({
+        layer: "shortTerm",
+        action: "prompt_context",
+        detail: input.workflowMcpPlanningContext.externalContext,
+        filePath: input.shortTermFilePath,
+      });
+      return {
+        structured: buildPausedStructuredAnswer(reason),
+        taskRun,
+        events,
+        agentRuns,
+        swarmRuns,
+        transitions,
+        validationResult,
+      };
+    }
+  }
+  const planningArtifactAccepted =
     taskRun.context.state === "planning" &&
-    taskRun.context.awaitingPlanApproval &&
+    taskRun.context.deliverableKind === "planning_artifact" &&
+    taskRun.context.plan.length > 0 &&
+    isExplicitPlanApproval(input.prompt) &&
+    !isExplicitImplementationRequest(input.prompt);
+  const implementationRequestedFromPlanningArtifact =
+    taskRun.context.state === "planning" &&
+    taskRun.context.deliverableKind === "planning_artifact" &&
     taskRun.context.plan.length > 0 &&
     taskRun.context.requirementsContract.readyForApproval &&
-    isExplicitPlanApproval(input.prompt);
+    isExplicitImplementationRequest(input.prompt);
+  const planApprovalGranted =
+    taskRun.context.state === "planning" &&
+    taskRun.context.plan.length > 0 &&
+    taskRun.context.requirementsContract.readyForApproval &&
+    ((taskRun.context.deliverableKind === "implementation_result" &&
+      taskRun.context.awaitingPlanApproval &&
+      isExplicitPlanApproval(input.prompt)) ||
+      implementationRequestedFromPlanningArtifact);
+
+  if (planningArtifactAccepted) {
+    const acceptedMessage = [
+      "Planning artifact accepted.",
+      "I will keep the task in Planning until you explicitly ask me to implement or change files.",
+    ].join(" ");
+    const acceptedTransition = makeTransitionDecision(
+      "planning",
+      "planning",
+      "User accepted the planning artifact without requesting Execution.",
+    );
+    transitions.push(acceptedTransition);
+    taskRun = {
+      ...taskRun,
+      transitions: [...taskRun.transitions, acceptedTransition],
+      context: updateTaskContext({
+        taskRun,
+        state: "planning",
+        done: [...taskRun.context.done, "Planning artifact accepted by user"],
+        current: acceptedMessage,
+        pausedReason: "Planning artifact accepted; waiting for implementation request or changes.",
+        awaitingPlanApproval: false,
+      }),
+      updatedAt: new Date().toISOString(),
+    };
+    events.push(...taskEvents({
+      taskRun,
+      transitions,
+      agentRuns,
+      swarmRuns,
+      validationResult,
+      filePath: input.shortTermFilePath,
+    }));
+    return {
+      structured: buildPausedStructuredAnswer(acceptedMessage),
+      taskRun,
+      events,
+      agentRuns,
+      swarmRuns,
+      transitions,
+      validationResult,
+    };
+  }
   const shouldPlan =
     (taskRun.context.state === "planning" && !planApprovalGranted) ||
     taskRun.context.plan.length === 0;
@@ -2804,6 +3317,7 @@ async function runTaskOrchestration(input: {
       workingMemory: input.workingMemory,
       longTermMemory: input.longTermMemory,
       gitMcpContext: input.gitMcpContext,
+      externalContext: input.workflowMcpPlanningContext?.externalContext,
     });
     agentRuns.push(...planning.agentRuns);
     swarmRuns.push(planning.swarmRun);
@@ -2814,22 +3328,21 @@ async function runTaskOrchestration(input: {
         planning.swarmRun.aggregatedDecision,
       ),
     );
-    const nextTaskInvariants = mergeTaskInvariants(
-      taskRun.taskInvariants,
+    const nextPendingTaskInvariants = mergeTaskInvariants(
+      taskRun.pendingTaskInvariants,
       planning.taskInvariants,
     );
-    const taskInvariantRefs = uniqueStrings([
-      ...taskRun.invariantRefs,
-      ...nextTaskInvariants.map((invariant) => invariant.id),
-    ]);
-    const nextPlanningInvariants = activeInvariantsForStage(
-      availableInvariants,
-      nextTaskInvariants,
-      "planning",
+    const taskInvariantRefs = allTaskInvariantRefs(
+      taskRun,
+      nextPendingTaskInvariants,
     );
+    const planningOnlyArtifact =
+      taskRun.context.deliverableKind === "planning_artifact";
     const planningGate = await runSemanticInvariantGate({
       stage: "planning",
-      proposedTransition: "planning -> execution approval request",
+      proposedTransition: planningOnlyArtifact
+        ? "planning artifact response"
+        : "planning -> execution approval request",
       artifactTitle: "Planning swarm decision",
       artifactText: planningArtifactText({
         plan: planning.plan,
@@ -2837,7 +3350,7 @@ async function runTaskOrchestration(input: {
         aggregatedDecision: planning.swarmRun.aggregatedDecision,
       }),
       taskRun,
-      invariants: nextPlanningInvariants,
+      invariants: planningInvariants,
       model: input.model,
     });
 
@@ -2864,7 +3377,7 @@ async function runTaskOrchestration(input: {
       taskRun = {
         ...taskRun,
         invariantRefs: taskInvariantRefs,
-        taskInvariants: nextTaskInvariants,
+        pendingTaskInvariants: nextPendingTaskInvariants,
         artifacts: [...taskRun.artifacts, ...artifacts],
         agentRuns: [...taskRun.agentRuns, ...agentRuns],
         swarmRuns: [...taskRun.swarmRuns, ...swarmRuns],
@@ -2905,6 +3418,67 @@ async function runTaskOrchestration(input: {
       };
     }
 
+    if (planningOnlyArtifact) {
+      const planningAnswer = buildPlanningArtifactAnswer({
+        plan: planning.plan,
+        requirementsContract: planning.requirementsContract,
+        workflowMcpPlanningContext: input.workflowMcpPlanningContext,
+      });
+      const planningArtifact = makeStageArtifact(
+        "planning",
+        "Planning artifact response",
+        planningAnswer,
+      );
+      const displayTransition = makeTransitionDecision(
+        "planning",
+        "planning",
+        "Planning artifact was displayed in the assistant dialog.",
+      );
+      transitions.push(displayTransition);
+      taskRun = {
+        ...taskRun,
+        invariantRefs: taskInvariantRefs,
+        pendingTaskInvariants: nextPendingTaskInvariants,
+        artifacts: [...taskRun.artifacts, ...artifacts, planningArtifact],
+        agentRuns: [...taskRun.agentRuns, ...agentRuns],
+        swarmRuns: [...taskRun.swarmRuns, ...swarmRuns],
+        transitions: [...taskRun.transitions, displayTransition],
+        context: updateTaskContext({
+          taskRun,
+          state: "planning",
+          task: taskLabelFromContract(
+            planning.requirementsContract,
+            taskRun.context.task,
+          ),
+          plan: planning.plan,
+          done: [...taskRun.context.done, "Planning artifact displayed"],
+          current: planningAnswer,
+          pausedReason:
+            "Planning artifact displayed; waiting for implementation request or changes.",
+          awaitingPlanApproval: false,
+          requirementsContract: planning.requirementsContract,
+        }),
+        updatedAt: new Date().toISOString(),
+      };
+      events.push(...taskEvents({
+        taskRun,
+        transitions,
+        agentRuns,
+        swarmRuns,
+        validationResult,
+        filePath: input.shortTermFilePath,
+      }));
+      return {
+        structured: buildPausedStructuredAnswer(planningAnswer),
+        taskRun,
+        events,
+        agentRuns,
+        swarmRuns,
+        transitions,
+        validationResult,
+      };
+    }
+
     const blockedExecutionTransition = makeTransitionDecision(
       "planning",
       "execution",
@@ -2919,7 +3493,7 @@ async function runTaskOrchestration(input: {
     taskRun = {
       ...taskRun,
       invariantRefs: taskInvariantRefs,
-      taskInvariants: nextTaskInvariants,
+      pendingTaskInvariants: nextPendingTaskInvariants,
       artifacts: [...taskRun.artifacts, ...artifacts],
       agentRuns: [...taskRun.agentRuns, ...agentRuns],
       swarmRuns: [...taskRun.swarmRuns, ...swarmRuns],
@@ -2958,74 +3532,29 @@ async function runTaskOrchestration(input: {
       validationResult,
     };
   } else if (planApprovalGranted) {
-    const approvalInvariants = activeInvariantsForStage(
-      availableInvariants,
-      taskInvariantsForRun(taskRun),
-      "planning",
-    );
-    const latestPlanning = latestStageArtifact(taskRun, "planning");
-    const approvalGate = await runSemanticInvariantGate({
-      stage: "planning",
-      proposedTransition: "planning -> execution",
-      artifactTitle: "Approved planning artifact",
-      artifactText: planningArtifactText({
-        plan: taskRun.context.plan,
-        requirementsContract: taskRun.context.requirementsContract,
-        aggregatedDecision: latestPlanning?.content ?? taskRun.context.current,
-      }),
-      taskRun,
-      invariants: approvalInvariants,
-      model: input.model,
-    });
-
-    if (semanticGateFailed(approvalGate)) {
-      const reason = formatSemanticGateReason("planning", approvalGate);
-      const pauseTransition = makeTransitionDecision("planning", "planning", reason);
-      transitions.push(pauseTransition);
-      taskRun = {
-        ...taskRun,
-        transitions: [...taskRun.transitions, pauseTransition],
-        context: updateTaskContext({
-          taskRun,
-          state: "planning",
-          plan: [],
-          current: reason,
-          pausedReason: reason,
-          awaitingPlanApproval: false,
-          requirementsContract: contractWithInvariantConflict(
-            taskRun.context.requirementsContract,
-            reason,
-          ),
-        }),
-        updatedAt: new Date().toISOString(),
-      };
-      events.push(...taskEvents({
-        taskRun,
-        transitions,
-        agentRuns,
-        swarmRuns,
-        validationResult,
-        filePath: input.shortTermFilePath,
-      }));
-      return {
-        structured: buildPausedStructuredAnswer(reason),
-        taskRun,
-        events,
-        agentRuns,
-        swarmRuns,
-        transitions,
-        validationResult,
-      };
-    }
-
     const planningTransition = makeTransitionDecision(
       "planning",
       "execution",
-      "User explicitly approved the plan; execution is allowed.",
+      implementationRequestedFromPlanningArtifact
+        ? "User explicitly requested implementation of the planning artifact."
+        : "User explicitly approved the plan; execution is allowed.",
+    );
+    const approvedTaskInvariants = mergeTaskInvariants(
+      taskRun.taskInvariants,
+      taskRun.pendingTaskInvariants,
     );
     transitions.push(planningTransition);
     taskRun = {
       ...taskRun,
+      invariantRefs: uniqueStrings(
+        [
+          ...taskRun.invariantRefs,
+          ...approvedTaskInvariants.map((invariant) => invariant.id),
+        ],
+        24,
+      ),
+      taskInvariants: approvedTaskInvariants,
+      pendingTaskInvariants: [],
       transitions: [...taskRun.transitions, planningTransition],
       context: updateTaskContext({
         taskRun,
@@ -3034,6 +3563,7 @@ async function runTaskOrchestration(input: {
         current: taskRun.context.plan[0] || "Execute the approved plan.",
         pausedReason: null,
         awaitingPlanApproval: false,
+        deliverableKind: "implementation_result",
       }),
       updatedAt: new Date().toISOString(),
     };
@@ -3228,68 +3758,6 @@ async function runTaskOrchestration(input: {
           validationResult,
         };
       }
-    }
-  }
-
-  if (taskRun.context.state === "execution") {
-    const approvedPlanInvariants = activeInvariantsForStage(
-      availableInvariants,
-      taskInvariantsForRun(taskRun),
-      "planning",
-    );
-    const latestPlanning = latestStageArtifact(taskRun, "planning");
-    const approvedPlanGate = await runSemanticInvariantGate({
-      stage: "planning",
-      proposedTransition: "execution continuation from saved plan",
-      artifactTitle: "Saved planning artifact",
-      artifactText: planningArtifactText({
-        plan: taskRun.context.plan,
-        requirementsContract: taskRun.context.requirementsContract,
-        aggregatedDecision: latestPlanning?.content ?? taskRun.context.current,
-      }),
-      taskRun,
-      invariants: approvedPlanInvariants,
-      model: input.model,
-    });
-
-    if (semanticGateFailed(approvedPlanGate)) {
-      const reason = formatSemanticGateReason("planning", approvedPlanGate);
-      const rollbackTransition = makeTransitionDecision("execution", "planning", reason);
-      transitions.push(rollbackTransition);
-      taskRun = {
-        ...taskRun,
-        transitions: [...taskRun.transitions, rollbackTransition],
-        context: updateTaskContext({
-          taskRun,
-          state: "planning",
-          plan: [],
-          current: reason,
-          pausedReason: reason,
-          awaitingPlanApproval: false,
-          requirementsContract: contractWithInvariantConflict(
-            taskRun.context.requirementsContract,
-            reason,
-          ),
-        }),
-        updatedAt: new Date().toISOString(),
-      };
-      events.push(...taskEvents({
-        taskRun,
-        transitions,
-        agentRuns,
-        swarmRuns,
-        validationResult,
-        filePath: input.shortTermFilePath,
-      }));
-      return {
-        structured: buildPausedStructuredAnswer(reason),
-        taskRun,
-        events,
-        agentRuns,
-        swarmRuns,
-        transitions,
-        validationResult,
-      };
     }
   }
 
@@ -3970,14 +4438,7 @@ function updateBranch(input: {
   return {
     activeBranchId,
     branches,
-    messages: [
-      input.dialog.messages.find((message) => message.role === "system") ?? {
-        role: "system" as const,
-        content:
-          "You are a unified AI Advent Challenge assistant. Use memory and topic branches deliberately.",
-      },
-      ...visibleMessages(activeBranch.messages),
-    ],
+    messages: visibleMessages(activeBranch.messages),
     events,
   };
 }
@@ -4194,6 +4655,16 @@ export async function POST(request: Request) {
       return NextResponse.json(nextState);
     }
 
+    if (action === "reset_task_run") {
+      const nextState = withUpdatedActiveMemoryDialog(state, (dialog) => ({
+        ...dialog,
+        pendingConfirmation: null,
+        taskRun: null,
+      }));
+      await writeMemoryLayersState(nextState);
+      return NextResponse.json(nextState);
+    }
+
     const prompt = body.prompt?.trim();
     if (!prompt) {
       return NextResponse.json({ error: "Prompt is required." }, { status: 400 });
@@ -4222,264 +4693,10 @@ export async function POST(request: Request) {
       activeTaskRun && activeTaskRun.context.state !== "done"
         ? activeTaskRun
         : createInitialTaskRun(prompt);
-    const day18SchedulerIntent = classifyDay18SchedulerPrompt(prompt);
-    if (
-      day18SchedulerIntent.anySchedulerSignal &&
-      !day18SchedulerIntent.implementationIntent
-    ) {
-      const startedAt = performance.now();
-      const schedulerMcpResult = await callDay18SchedulerTool({
-        action: day18SchedulerIntent.action,
-        intervalSeconds: day18SchedulerIntent.intervalSeconds,
-        note: `chat action ${day18SchedulerIntent.action}`,
-      });
-      const schedulerMcpContext =
-        formatDay18SchedulerContext(schedulerMcpResult);
-      const assistantAnswer = formatDay18SchedulerAnswer(schedulerMcpResult);
-      const structured: AssistantStructuredResult = {
-        answer: assistantAnswer,
-        branch: {
-          action: "keep",
-          title: null,
-          summary: null,
-          reason:
-            "Day 18 scheduler MCP request answered from tool data.",
-        },
-        memoryUpdates: [],
-        confirmationQuestion: null,
-      };
-      const userMessage: ChatMessage = {
-        role: "user",
-        content: prompt,
-        profileId: activeProfile.id,
-      };
-      const assistantMessage: ChatMessage = {
-        role: "assistant",
-        content: assistantAnswer,
-        profileId: activeProfile.id,
-      };
-      const branchUpdate = updateBranch({
-        dialog: active,
-        selectedBranch: selected.branch,
-        structured,
-        userMessage,
-        assistantMessage,
-        needsSummary,
-        activeProfileId: activeProfile.id,
-      });
-      const contextTokens = estimateTextTokens(schedulerMcpContext).estimatedTokens;
-      const requestTokens = estimateTextTokens(prompt).estimatedTokens;
-      const responseTokens = estimateTextTokens(assistantAnswer).estimatedTokens;
-      const totalTokens = contextTokens + requestTokens + responseTokens;
-      const metricRow: TokenMetricRow = {
-        id: makeMemoryLayerId("memory-metric"),
-        turn: active.metrics.length + 1,
-        status: "sent",
-        requestTokens,
-        contextTokens,
-        responseTokens,
-        totalTokens,
-        elapsedMs: Math.round(performance.now() - startedAt),
-        providerCost: null,
-        note: `Day 18 scheduler MCP ${day18SchedulerIntent.action} answer for branch "${selected.branch.title}".`,
-      };
-      const nextMetrics = [...active.metrics, metricRow];
-      const shortTermEvents: MemoryLayerEvent[] = [
-        {
-          layer: "shortTerm",
-          action: "saved",
-          detail:
-            "Day 18 scheduler user request and MCP answer were stored in the selected topic branch.",
-          filePath: state.filePaths.shortTerm,
-        },
-        {
-          layer: "shortTerm",
-          action: "selected_branch",
-          detail: `${selected.branch.title}: ${selected.reason}`,
-          filePath: state.filePaths.shortTerm,
-        },
-        {
-          layer: "shortTerm",
-          action: "prompt_context",
-          detail:
-            "Day 18 scheduler MCP result was used directly. Existing lifecycle task state and task-local invariants were preserved but not applied.",
-          filePath: state.filePaths.shortTerm,
-        },
-        {
-          layer: "shortTerm",
-          action: "prompt_context",
-          detail: formatDay18SchedulerEventDetail(schedulerMcpResult),
-          filePath: state.filePaths.shortTerm,
-        },
-        {
-          layer: "longTerm",
-          action: "skipped",
-          detail:
-            "Profile extraction skipped for a Day 18 scheduler MCP request.",
-          filePath: state.filePaths.userProfiles,
-        },
-        ...branchUpdate.events.map((event) => ({
-          ...event,
-          filePath: event.filePath || state.filePaths.shortTerm,
-        })),
-      ];
-      const nextState = withUpdatedActiveMemoryDialog(
-        addGlobalMetricRow(state, metricRow),
-        (dialog) => ({
-          ...dialog,
-          activeBranchId: branchUpdate.activeBranchId,
-          branches: branchUpdate.branches,
-          messages: branchUpdate.messages,
-          metrics: nextMetrics,
-          compactMetricsSummary: summarizeMetrics(nextMetrics),
-          pendingConfirmation: null,
-          taskRun: active.taskRun,
-        }),
-      );
-      await writeMemoryLayersState(nextState);
-
-      return NextResponse.json({
-        ...nextState,
-        events: shortTermEvents,
-        recentMessageCount: recentMessages.length,
-        result: {
-          answer: assistantAnswer,
-          model: "day18-scheduler-mcp",
-          elapsedMs: metricRow.elapsedMs,
-          usage: {
-            promptTokens: null,
-            completionTokens: null,
-            totalTokens: null,
-            providerCost: null,
-          },
-        },
-      });
-    }
-    const isReadOnlyStatusRequest = isReadOnlyProjectStatusPrompt(prompt);
-    if (isReadOnlyStatusRequest) {
-      const startedAt = performance.now();
-      const gitMcpResult = await callGitRepositoryStatusTool();
-      const gitMcpContext = formatGitMcpContext(gitMcpResult);
-      const assistantAnswer = formatReadOnlyGitMcpAnswer(gitMcpResult, prompt);
-      const structured: AssistantStructuredResult = {
-        answer: assistantAnswer,
-        branch: {
-          action: "keep",
-          title: null,
-          summary: null,
-          reason:
-            "Read-only project status question answered from Day 17 Git MCP data.",
-        },
-        memoryUpdates: [],
-        confirmationQuestion: null,
-      };
-      const userMessage: ChatMessage = {
-        role: "user",
-        content: prompt,
-        profileId: activeProfile.id,
-      };
-      const assistantMessage: ChatMessage = {
-        role: "assistant",
-        content: assistantAnswer,
-        profileId: activeProfile.id,
-      };
-      const branchUpdate = updateBranch({
-        dialog: active,
-        selectedBranch: selected.branch,
-        structured,
-        userMessage,
-        assistantMessage,
-        needsSummary,
-        activeProfileId: activeProfile.id,
-      });
-      const contextTokens = estimateTextTokens(gitMcpContext).estimatedTokens;
-      const requestTokens = estimateTextTokens(prompt).estimatedTokens;
-      const responseTokens = estimateTextTokens(assistantAnswer).estimatedTokens;
-      const totalTokens = contextTokens + requestTokens + responseTokens;
-      const metricRow: TokenMetricRow = {
-        id: makeMemoryLayerId("memory-metric"),
-        turn: active.metrics.length + 1,
-        status: "sent",
-        requestTokens,
-        contextTokens,
-        responseTokens,
-        totalTokens,
-        elapsedMs: Math.round(performance.now() - startedAt),
-        providerCost: null,
-        note: `Read-only Git MCP status answer for branch "${selected.branch.title}".`,
-      };
-      const nextMetrics = [...active.metrics, metricRow];
-      const shortTermEvents: MemoryLayerEvent[] = [
-        {
-          layer: "shortTerm",
-          action: "saved",
-          detail:
-            "Read-only user question and Git MCP answer were stored in the selected topic branch.",
-          filePath: state.filePaths.shortTerm,
-        },
-        {
-          layer: "shortTerm",
-          action: "selected_branch",
-          detail: `${selected.branch.title}: ${selected.reason}`,
-          filePath: state.filePaths.shortTerm,
-        },
-        {
-          layer: "shortTerm",
-          action: "prompt_context",
-          detail:
-            "Day 17 Git MCP result was used for a read-only status answer. Existing lifecycle task state and task-local invariants were preserved but not applied.",
-          filePath: state.filePaths.shortTerm,
-        },
-        {
-          layer: "shortTerm",
-          action: "prompt_context",
-          detail: formatGitMcpEventDetail(gitMcpResult),
-          filePath: state.filePaths.shortTerm,
-        },
-        {
-          layer: "longTerm",
-          action: "skipped",
-          detail:
-            "Profile extraction skipped for a read-only project status question.",
-          filePath: state.filePaths.userProfiles,
-        },
-        ...branchUpdate.events.map((event) => ({
-          ...event,
-          filePath: event.filePath || state.filePaths.shortTerm,
-        })),
-      ];
-      const nextState = withUpdatedActiveMemoryDialog(
-        addGlobalMetricRow(state, metricRow),
-        (dialog) => ({
-          ...dialog,
-          activeBranchId: branchUpdate.activeBranchId,
-          branches: branchUpdate.branches,
-          messages: branchUpdate.messages,
-          metrics: nextMetrics,
-          compactMetricsSummary: summarizeMetrics(nextMetrics),
-          pendingConfirmation: null,
-          taskRun: active.taskRun,
-        }),
-      );
-      await writeMemoryLayersState(nextState);
-
-      return NextResponse.json({
-        ...nextState,
-        events: shortTermEvents,
-        recentMessageCount: recentMessages.length,
-        result: {
-          answer: assistantAnswer,
-          model: "git-mcp-readonly",
-          elapsedMs: metricRow.elapsedMs,
-          usage: {
-            promptTokens: null,
-            completionTokens: null,
-            totalTokens: null,
-            providerCost: null,
-          },
-        },
-      });
-    }
+    const workflowMcpPlanningContext = await loadWorkflowMcpPlanningContext(
+      prompt,
+      turnTaskRun,
+    );
     let extractorError: string | null = null;
     let extractedProfileUpdates: AssistantProfileUpdate[] = [];
     try {
@@ -4503,12 +4720,6 @@ export async function POST(request: Request) {
       sourceText: update.sourceText || prompt,
       confidence: update.confidence,
     }));
-    let gitMcpResult: GitMcpToolCallResult | null = null;
-    let gitMcpContext: string | null = null;
-    if (shouldAttachGitMcpContext(prompt, turnTaskRun)) {
-      gitMcpResult = await callGitRepositoryStatusTool();
-      gitMcpContext = formatGitMcpContext(gitMcpResult);
-    }
     const filePathsText = [
       "Memory files:",
       `- Short-term branch JSON: ${state.filePaths.shortTerm}`,
@@ -4551,7 +4762,7 @@ export async function POST(request: Request) {
       needsSummary,
       currentProfileSuggestionCount: pendingProfileUpdates.length,
       shortTermFilePath: state.filePaths.shortTerm,
-      gitMcpContext,
+      workflowMcpPlanningContext,
     });
     const structured = taskOrchestration.structured;
     const result: LlmResult = {
@@ -4655,18 +4866,16 @@ export async function POST(request: Request) {
           `Profile-like memory filtered from prompt: ${promptWorkingMemory.removedCount + promptLongTermMemory.removedCount}.`,
           "Injected profile fields: role/context, style, format, constraints.",
           "Task orchestration: lifecycle-only mode captured stage agents, planning swarm, transition checks, and validation result.",
-          gitMcpContext
-            ? "Day 17 Git MCP result was injected into stage-agent context."
-            : "Day 17 Git MCP result was not needed for this turn.",
+          "MCP context policy: read-only MCP context may support workflow stages; mutating MCP actions still require lifecycle approval or a proper UI/scheduled trigger.",
         ].join("\n"),
         filePath: state.filePaths.shortTerm,
       },
-      ...(gitMcpResult
+      ...(workflowMcpPlanningContext
         ? [
             {
               layer: "shortTerm" as const,
               action: "prompt_context" as const,
-              detail: formatGitMcpEventDetail(gitMcpResult),
+              detail: workflowMcpPlanningContext.externalContext,
               filePath: state.filePaths.shortTerm,
             },
           ]

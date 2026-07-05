@@ -59,6 +59,8 @@ export type TaskState =
   | "acceptance"
   | "done";
 
+export type TaskDeliverableKind = "planning_artifact" | "implementation_result";
+
 export type TaskInvariantScope = "global" | "task" | "stage";
 
 export type TaskInvariantSeverity = "blocker" | "warning";
@@ -93,6 +95,7 @@ export type TaskContext = {
   id: string;
   task: string;
   state: TaskState;
+  deliverableKind: TaskDeliverableKind;
   step: number;
   total: number;
   plan: string[];
@@ -101,6 +104,7 @@ export type TaskContext = {
   pausedReason: string | null;
   awaitingPlanApproval: boolean;
   requirementsContract: RequirementsContract;
+  externalContext: string | null;
   startedAt: string;
   updatedAt: string;
 };
@@ -157,6 +161,7 @@ export type TaskRun = {
   context: TaskContext;
   invariantRefs: string[];
   taskInvariants: TaskInvariant[];
+  pendingTaskInvariants: TaskInvariant[];
   artifacts: StageArtifact[];
   agentRuns: AgentRun[];
   swarmRuns: SwarmRun[];
@@ -255,12 +260,6 @@ type UserProfilesFile = {
   profiles?: unknown[];
 };
 
-const SYSTEM_MESSAGE: ChatMessage = {
-  role: "system",
-  content:
-    "You are a unified AI Advent Challenge assistant. Use short-term branch context, working task memory, and long-term profile memory deliberately.",
-};
-
 function defaultMemoryFolder() {
   return path.join(os.homedir(), "Documents", "AI-Advent-Challenge", "memory");
 }
@@ -323,7 +322,7 @@ function createDialog(index: number): MemoryDialog {
   return {
     id: makeId("memory-dialog"),
     title: `Dialog ${index}`,
-    messages: [SYSTEM_MESSAGE],
+    messages: [],
     metrics: [],
     activeBranchId: branch.id,
     branches: [branch],
@@ -544,6 +543,31 @@ function normalizeTaskState(value: unknown, fallback: TaskState = "planning"): T
   return TASK_STATES.includes(value as TaskState) ? (value as TaskState) : fallback;
 }
 
+function normalizeTaskDeliverableKind(
+  value: unknown,
+  task = "",
+  contract?: RequirementsContract,
+): TaskDeliverableKind {
+  if (value === "planning_artifact" || value === "implementation_result") {
+    return value;
+  }
+
+  const text = [
+    task,
+    contract?.goal ?? "",
+    contract?.targetLocation ?? "",
+    ...(contract?.requirements ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  return /assistant dialog|workflow-aware plan|\bshow\b.*\bplan\b|\bplan\b|план|услови|задан/i.test(
+    text,
+  )
+    ? "planning_artifact"
+    : "implementation_result";
+}
+
 function normalizeStringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value
@@ -603,6 +627,25 @@ function normalizeTaskInvariant(value: unknown): TaskInvariant | null {
         ? candidate.updatedAt
         : nowIso(),
   };
+}
+
+function isWorkflowMetaTaskInvariant(invariant: Pick<TaskInvariant, "title" | "description">) {
+  const text = `${invariant.title} ${invariant.description}`
+    .toLowerCase()
+    .replace(/[^a-zа-яё0-9]+/giu, " ");
+  return [
+    "lifecycle workflow priority",
+    "workflow lifecycle",
+    "explicit approval",
+    "plan approval",
+    "before execution",
+    "read only mcp",
+    "mutating mcp",
+    "mcp context policy",
+    "orchestrator",
+    "validation before done",
+    "user acceptance",
+  ].some((signal) => text.includes(signal));
 }
 
 function normalizeInvariants(value: unknown): TaskInvariant[] {
@@ -700,11 +743,19 @@ function normalizeTaskContext(value: unknown): TaskContext | null {
     typeof candidate.step === "number" && Number.isFinite(candidate.step)
       ? Math.min(total, Math.max(1, Math.round(candidate.step)))
       : 1;
+  const requirementsContract = normalizeRequirementsContract(
+    candidate.requirementsContract,
+  );
 
   return {
     id: candidate.id,
     task: candidate.task.trim() || "Untitled task",
     state: normalizeTaskState(candidate.state),
+    deliverableKind: normalizeTaskDeliverableKind(
+      candidate.deliverableKind,
+      candidate.task,
+      requirementsContract,
+    ),
     step,
     total,
     plan,
@@ -715,9 +766,12 @@ function normalizeTaskContext(value: unknown): TaskContext | null {
         ? candidate.pausedReason.trim()
         : null,
     awaitingPlanApproval: candidate.awaitingPlanApproval === true,
-    requirementsContract: normalizeRequirementsContract(
-      candidate.requirementsContract,
-    ),
+    requirementsContract,
+    externalContext:
+      typeof candidate.externalContext === "string" &&
+      candidate.externalContext.trim()
+        ? candidate.externalContext.trim()
+        : null,
     startedAt:
       typeof candidate.startedAt === "string" && candidate.startedAt
         ? candidate.startedAt
@@ -882,6 +936,33 @@ function normalizeValidationResult(value: unknown): ValidationResult | null {
   };
 }
 
+function normalizeTaskInvariantArray(value: unknown): TaskInvariant[] {
+  return Array.isArray(value)
+    ? value
+        .map(normalizeTaskInvariant)
+        .filter((invariant): invariant is TaskInvariant => invariant !== null)
+        .filter((invariant) => invariant.source === "task")
+        .filter((invariant) => !isWorkflowMetaTaskInvariant(invariant))
+    : [];
+}
+
+function hasApprovedTaskPlan(
+  context: TaskContext,
+  transitions: TransitionDecision[],
+) {
+  return (
+    context.done.some((item) =>
+      item.toLowerCase().includes("plan explicitly approved by user"),
+    ) ||
+    transitions.some(
+      (transition) =>
+        transition.from === "planning" &&
+        transition.to === "execution" &&
+        transition.allowed,
+    )
+  );
+}
+
 function normalizeTaskRun(value: unknown): TaskRun | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -894,48 +975,60 @@ function normalizeTaskRun(value: unknown): TaskRun | null {
   if (!context) {
     return null;
   }
-  const taskInvariants = Array.isArray(candidate.taskInvariants)
-    ? candidate.taskInvariants
-        .map(normalizeTaskInvariant)
-        .filter((invariant): invariant is TaskInvariant => invariant !== null)
-        .filter((invariant) => invariant.source === "task")
+  const artifacts = Array.isArray(candidate.artifacts)
+    ? candidate.artifacts
+        .map(normalizeStageArtifact)
+        .filter((artifact): artifact is StageArtifact => artifact !== null)
+    : [];
+  const agentRuns = Array.isArray(candidate.agentRuns)
+    ? candidate.agentRuns
+        .map(normalizeAgentRun)
+        .filter((run): run is AgentRun => run !== null)
+    : [];
+  const swarmRuns = Array.isArray(candidate.swarmRuns)
+    ? candidate.swarmRuns
+        .map(normalizeSwarmRun)
+        .filter((run): run is SwarmRun => run !== null)
+    : [];
+  const transitions = Array.isArray(candidate.transitions)
+    ? candidate.transitions
+        .map(normalizeTransitionDecision)
+        .filter((decision): decision is TransitionDecision => decision !== null)
+    : [];
+  const legacyTaskInvariants = Array.isArray(candidate.taskInvariants)
+    ? normalizeTaskInvariantArray(candidate.taskInvariants)
+    : normalizeTaskInvariantArray(candidate.invariants);
+  const normalizedPendingTaskInvariants = normalizeTaskInvariantArray(
+    candidate.pendingTaskInvariants,
+  );
+  const shouldTreatLegacyInvariantsAsPending =
+    context.state === "planning" && !hasApprovedTaskPlan(context, transitions);
+  const taskInvariants = shouldTreatLegacyInvariantsAsPending
+    ? []
+    : legacyTaskInvariants;
+  const pendingTaskInvariants = shouldTreatLegacyInvariantsAsPending
+    ? [...legacyTaskInvariants, ...normalizedPendingTaskInvariants]
+    : normalizedPendingTaskInvariants;
+  const allowedInvariantIds = new Set(
+    [...taskInvariants, ...pendingTaskInvariants].map((invariant) => invariant.id),
+  );
+  const invariantRefs = Array.isArray(candidate.invariantRefs)
+    ? candidate.invariantRefs
+        .filter((item): item is string => typeof item === "string")
+        .filter((item) => allowedInvariantIds.has(item))
     : Array.isArray(candidate.invariants)
-      ? candidate.invariants
-          .map(normalizeTaskInvariant)
-          .filter((invariant): invariant is TaskInvariant => invariant !== null)
-          .filter((invariant) => invariant.source === "task")
+      ? taskInvariants.map((invariant) => invariant.id)
       : [];
 
   return {
     context,
-    invariantRefs: Array.isArray(candidate.invariantRefs)
-      ? candidate.invariantRefs.filter(
-          (item): item is string => typeof item === "string",
-        )
-      : Array.isArray(candidate.invariants)
-        ? taskInvariants.map((invariant) => invariant.id)
-        : [],
+    invariantRefs,
     taskInvariants,
-    artifacts: Array.isArray(candidate.artifacts)
-      ? candidate.artifacts
-          .map(normalizeStageArtifact)
-          .filter((artifact): artifact is StageArtifact => artifact !== null)
-      : [],
-    agentRuns: Array.isArray(candidate.agentRuns)
-      ? candidate.agentRuns
-          .map(normalizeAgentRun)
-          .filter((run): run is AgentRun => run !== null)
-      : [],
-    swarmRuns: Array.isArray(candidate.swarmRuns)
-      ? candidate.swarmRuns
-          .map(normalizeSwarmRun)
-          .filter((run): run is SwarmRun => run !== null)
-      : [],
-    transitions: Array.isArray(candidate.transitions)
-      ? candidate.transitions
-          .map(normalizeTransitionDecision)
-          .filter((decision): decision is TransitionDecision => decision !== null)
-      : [],
+    pendingTaskInvariants,
+    artifacts,
+    agentRuns,
+    swarmRuns,
+    transitions,
     validationResult: normalizeValidationResult(candidate.validationResult),
     updatedAt:
       typeof candidate.updatedAt === "string" && candidate.updatedAt
@@ -1062,8 +1155,10 @@ function normalizeDialogs(value: unknown): MemoryDialog[] {
         })
         .map((dialog, index) => {
           const messages = Array.isArray(dialog.messages)
-            ? dialog.messages.filter(isChatMessage)
-            : [SYSTEM_MESSAGE];
+            ? dialog.messages
+                .filter(isChatMessage)
+                .filter((message) => message.role !== "system")
+            : [];
           const visible = visibleMessages(messages);
           const rawBranches = Array.isArray(dialog.branches)
             ? dialog.branches
@@ -1083,7 +1178,7 @@ function normalizeDialogs(value: unknown): MemoryDialog[] {
           return {
             id: String(dialog.id),
             title: String(dialog.title),
-            messages: messages.length ? messages : [SYSTEM_MESSAGE],
+            messages,
             metrics: Array.isArray(dialog.metrics)
               ? dialog.metrics.filter(isMetricRow)
               : [],

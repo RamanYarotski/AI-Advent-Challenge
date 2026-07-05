@@ -85,8 +85,6 @@ type TokenLabState = {
   dialogs: TokenDialog[];
 };
 
-type MemoryLayerKey = "shortTerm" | "working" | "longTerm";
-
 type MemoryFileSettings = {
   memoryFolder: string;
   shortTermFileName: string;
@@ -110,24 +108,6 @@ type MemoryLayerNote = {
   text: string;
   source: string;
   createdAt: string;
-};
-
-type MemoryLayerEvent = {
-  layer: MemoryLayerKey;
-  action:
-    | "saved"
-    | "skipped"
-    | "needs_confirmation"
-    | "selected_branch"
-    | "created_branch"
-    | "updated_summary"
-    | "prompt_context"
-    | "task_state"
-    | "agent_run"
-    | "transition"
-    | "invariant_check";
-  detail: string;
-  filePath: string;
 };
 
 type TaskState =
@@ -175,6 +155,7 @@ type TaskContext = {
   id: string;
   task: string;
   state: TaskState;
+  deliverableKind?: "planning_artifact" | "implementation_result";
   step: number;
   total: number;
   plan: string[];
@@ -183,6 +164,7 @@ type TaskContext = {
   pausedReason: string | null;
   awaitingPlanApproval: boolean;
   requirementsContract: RequirementsContract;
+  externalContext: string | null;
   startedAt: string;
   updatedAt: string;
 };
@@ -239,6 +221,7 @@ type TaskRun = {
   context: TaskContext;
   invariantRefs: string[];
   taskInvariants: TaskInvariant[];
+  pendingTaskInvariants: TaskInvariant[];
   artifacts: StageArtifact[];
   agentRuns: AgentRun[];
   swarmRuns: SwarmRun[];
@@ -316,18 +299,6 @@ type McpDiscoveredTool = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-};
-
-type McpToolsState = {
-  connected: boolean;
-  serverName: string;
-  serverVersion: string | null;
-  transport: "stdio";
-  allowedRoot: string;
-  tools: McpDiscoveredTool[];
-  error: string | null;
-  stderr: string | null;
-  checkedAt: string;
 };
 
 type GitMcpChangedFile = {
@@ -509,50 +480,6 @@ type SchedulerMcpToolState = {
     startedAt: string | null;
     lastWorkerError: string | null;
   };
-  error: string | null;
-  stderr: string | null;
-  checkedAt: string;
-};
-
-type Day19BriefingAction = "extract" | "build" | "save" | "run_chain";
-
-type Day19BriefingStepState = {
-  toolName:
-    | "extract_briefing_messages"
-    | "build_challenge_digest"
-    | "save_challenge_digest";
-  status: "success" | "failed";
-  outputSummary?: string;
-  startedAt: string;
-  finishedAt: string;
-  durationMs: number;
-  error?: string | null;
-};
-
-type Day19BriefingStructuredContent = {
-  action: Day19BriefingAction;
-  message: string;
-  dataRoot: string | null;
-  extraction: Record<string, unknown> | null;
-  digest: Record<string, unknown> | null;
-  savedPaths: string[];
-  steps: Day19BriefingStepState[];
-  checkedAt: string;
-};
-
-type Day19BriefingToolState = {
-  connected: boolean;
-  serverName: string;
-  serverVersion: string | null;
-  transport: "stdio";
-  requestedAction: Day19BriefingAction;
-  arguments: {
-    action: Day19BriefingAction;
-  } & Record<string, unknown>;
-  tools: McpDiscoveredTool[];
-  steps: Day19BriefingStepState[];
-  structuredContent: Day19BriefingStructuredContent | null;
-  contentText: string | null;
   error: string | null;
   stderr: string | null;
   checkedAt: string;
@@ -919,24 +846,13 @@ async function loadMemoryLayersLab() {
   return payload as MemoryLayersState;
 }
 
-async function loadMcpTools() {
-  const response = await fetch("/api/agent/mcp-tools", {
-    cache: "no-store",
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.error || "Failed to list MCP tools.");
-  }
-  return payload as McpToolsState;
-}
-
 async function loadGitMcpTool() {
   const response = await fetch("/api/agent/mcp-day17", {
     cache: "no-store",
   });
   const payload = await response.json();
   if (!response.ok) {
-    throw new Error(payload.error || "Failed to call Day 17 Git MCP tool.");
+    throw new Error(payload.error || "Failed to load Git repository status.");
   }
   return payload as GitMcpToolState;
 }
@@ -972,33 +888,6 @@ async function loadSchedulerMcpTool(input: SchedulerMcpRequest = {}) {
   return payload as SchedulerMcpToolState;
 }
 
-type Day19BriefingRequest = {
-  action?: Day19BriefingAction;
-  dataRoot?: string;
-  targetDays?: number[];
-  priorityAuthors?: string[];
-  keywords?: string[];
-  maxMessages?: number;
-  selectionMode?: "cached_relevant" | "focused";
-  messageLimit?: number;
-  extractionPath?: string;
-  digestPath?: string;
-};
-
-async function loadDay19BriefingTool(input: Day19BriefingRequest = {}) {
-  const response = await fetch("/api/agent/mcp-day19", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    cache: "no-store",
-    body: JSON.stringify(input),
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.error || "Failed to call Day 19 briefing MCP tool.");
-  }
-  return payload as Day19BriefingToolState;
-}
-
 type Day20WorkflowRequest = {
   action?: Day20WorkflowAction;
   dataRoot?: string;
@@ -1022,6 +911,26 @@ async function loadDay20WorkflowTool(input: Day20WorkflowRequest = {}) {
   return payload as Day20WorkflowToolState;
 }
 
+function gitMcpFailureState(message: string): GitMcpToolState {
+  return {
+    connected: false,
+    serverName: "ai-advent-day17-git",
+    serverVersion: null,
+    transport: "stdio",
+    toolName: "get_repository_status",
+    arguments: {
+      includeChangedFiles: true,
+      includeRecentCommits: true,
+    },
+    tools: [],
+    structuredContent: null,
+    contentText: null,
+    error: message,
+    stderr: null,
+    checkedAt: new Date().toISOString(),
+  };
+}
+
 async function runMemoryLayersAction(input: {
   action:
     | "create_dialog"
@@ -1042,7 +951,8 @@ async function runMemoryLayersAction(input: {
     | "dismiss_all_profile_updates"
     | "create_invariant"
     | "update_invariant"
-    | "delete_invariant";
+    | "delete_invariant"
+    | "reset_task_run";
   dialogId?: string;
   title?: string;
   prompt?: string;
@@ -1065,7 +975,7 @@ async function runMemoryLayersAction(input: {
     throw new Error(payload.error || "Memory layers action failed.");
   }
   return payload as MemoryLayersState & {
-    events?: MemoryLayerEvent[];
+    events?: unknown[];
     recentMessageCount?: number;
   };
 }
@@ -1149,17 +1059,11 @@ export default function Home() {
   const [strategyLab, setStrategyLab] = useState<TokenLabState | null>(null);
   const [memoryLayersLab, setMemoryLayersLab] =
     useState<MemoryLayersState | null>(null);
-  const [memoryLayerEvents, setMemoryLayerEvents] = useState<MemoryLayerEvent[]>([]);
-  const [mcpToolsState, setMcpToolsState] = useState<McpToolsState | null>(null);
-  const [mcpToolsLoading, setMcpToolsLoading] = useState(false);
   const [gitMcpState, setGitMcpState] = useState<GitMcpToolState | null>(null);
   const [gitMcpLoading, setGitMcpLoading] = useState(false);
   const [schedulerMcpState, setSchedulerMcpState] =
     useState<SchedulerMcpToolState | null>(null);
   const [schedulerMcpLoading, setSchedulerMcpLoading] = useState(false);
-  const [day19BriefingState, setDay19BriefingState] =
-    useState<Day19BriefingToolState | null>(null);
-  const [day19BriefingLoading, setDay19BriefingLoading] = useState(false);
   const [day20WorkflowState, setDay20WorkflowState] =
     useState<Day20WorkflowToolState | null>(null);
   const [day20WorkflowLoading, setDay20WorkflowLoading] = useState(false);
@@ -1191,6 +1095,38 @@ export default function Home() {
               ? historyError.message
               : "Failed to load memory history.",
           );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDay]);
+
+  useEffect(() => {
+    if (activeDay !== "day11" && activeDay !== "day12") {
+      return;
+    }
+
+    let cancelled = false;
+    loadGitMcpTool()
+      .then((state) => {
+        if (!cancelled) {
+          setGitMcpState(state);
+        }
+      })
+      .catch((statusError) => {
+        if (!cancelled) {
+          const message =
+            statusError instanceof Error
+              ? statusError.message
+              : "Unexpected Git repository status error.";
+          setGitMcpState(gitMcpFailureState(message));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setGitMcpLoading(false);
         }
       });
 
@@ -1470,34 +1406,6 @@ export default function Home() {
     );
   }, [memoryLayersLab]);
 
-  async function refreshMcpTools() {
-    setMcpToolsLoading(true);
-    setError("");
-    try {
-      const nextState = await loadMcpTools();
-      setMcpToolsState(nextState);
-    } catch (requestError) {
-      const message =
-        requestError instanceof Error
-          ? requestError.message
-          : "Unexpected MCP tools error.";
-      setError(message);
-      setMcpToolsState({
-        connected: false,
-        serverName: "filesystem",
-        serverVersion: null,
-        transport: "stdio",
-        allowedRoot: "",
-        tools: [],
-        error: message,
-        stderr: null,
-        checkedAt: new Date().toISOString(),
-      });
-    } finally {
-      setMcpToolsLoading(false);
-    }
-  }
-
   async function refreshGitMcpTool() {
     setGitMcpLoading(true);
     setError("");
@@ -1508,25 +1416,9 @@ export default function Home() {
       const message =
         requestError instanceof Error
           ? requestError.message
-          : "Unexpected Day 17 Git MCP error.";
+          : "Unexpected Git repository status error.";
       setError(message);
-      setGitMcpState({
-        connected: false,
-        serverName: "ai-advent-day17-git",
-        serverVersion: null,
-        transport: "stdio",
-        toolName: "get_repository_status",
-        arguments: {
-          includeChangedFiles: true,
-          includeRecentCommits: true,
-        },
-        tools: [],
-        structuredContent: null,
-        contentText: null,
-        error: message,
-        stderr: null,
-        checkedAt: new Date().toISOString(),
-      });
+      setGitMcpState(gitMcpFailureState(message));
     } finally {
       setGitMcpLoading(false);
     }
@@ -1588,45 +1480,6 @@ export default function Home() {
     }
   }
 
-  async function refreshDay19BriefingTool(
-    action: Day19BriefingAction = "run_chain",
-  ) {
-    setDay19BriefingLoading(true);
-    setError("");
-    try {
-      const nextState = await loadDay19BriefingTool({
-        action,
-        dataRoot: schedulerMcpState?.structuredContent?.dataRoot,
-      });
-      setDay19BriefingState(nextState);
-    } catch (requestError) {
-      const message =
-        requestError instanceof Error
-          ? requestError.message
-          : "Unexpected Day 19 briefing MCP error.";
-      setError(message);
-      setDay19BriefingState({
-        connected: false,
-        serverName: "ai-advent-day19-briefing",
-        serverVersion: null,
-        transport: "stdio",
-        requestedAction: action,
-        arguments: {
-          action,
-        },
-        tools: [],
-        steps: [],
-        structuredContent: null,
-        contentText: null,
-        error: message,
-        stderr: null,
-        checkedAt: new Date().toISOString(),
-      });
-    } finally {
-      setDay19BriefingLoading(false);
-    }
-  }
-
   async function refreshDay20WorkflowTool(
     action: Day20WorkflowAction = "run_workflow",
   ) {
@@ -1637,12 +1490,30 @@ export default function Home() {
         action,
         dataRoot:
           schedulerMcpState?.structuredContent?.dataRoot ??
-          day19BriefingState?.structuredContent?.dataRoot ??
           day20WorkflowState?.structuredContent?.dataRoot ??
           undefined,
         refreshSource: true,
       });
       setDay20WorkflowState(nextState);
+      if (nextState.structuredContent?.gitStatus) {
+        setGitMcpState((current) => ({
+          connected: true,
+          serverName: current?.serverName ?? "ai-advent-day17-git",
+          serverVersion: current?.serverVersion ?? null,
+          transport: "stdio",
+          toolName: "get_repository_status",
+          arguments: {
+            includeChangedFiles: true,
+            includeRecentCommits: true,
+          },
+          tools: current?.tools ?? [],
+          structuredContent: nextState.structuredContent?.gitStatus ?? null,
+          contentText: current?.contentText ?? null,
+          error: null,
+          stderr: null,
+          checkedAt: nextState.checkedAt,
+        }));
+      }
     } catch (requestError) {
       const message =
         requestError instanceof Error
@@ -1669,6 +1540,11 @@ export default function Home() {
     } finally {
       setDay20WorkflowLoading(false);
     }
+  }
+
+  function resetDay20WorkflowPanel() {
+    setError("");
+    setDay20WorkflowState(null);
   }
 
   async function updateTokenLab(
@@ -1878,9 +1754,6 @@ export default function Home() {
     try {
       const nextLab = await runMemoryLayersAction(action);
       setMemoryLayersLab(nextLab);
-      if (nextLab.events) {
-        setMemoryLayerEvents(nextLab.events);
-      }
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -2006,6 +1879,10 @@ export default function Home() {
     });
   }
 
+  function resetTaskRun() {
+    void updateMemoryLayersLab({ action: "reset_task_run" });
+  }
+
   async function sendMemoryLayersMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
@@ -2017,7 +1894,6 @@ export default function Home() {
         model: model || undefined,
       });
       setMemoryLayersLab(nextLab);
-      setMemoryLayerEvents(nextLab.events ?? []);
       setPrompt("");
     } catch (requestError) {
       setError(
@@ -2417,17 +2293,12 @@ Solve the task as a group of experts:
           {(activeDay === "day11" || activeDay === "day12") && memoryLayersLab && (
             <MemoryLayersView
               activeDialog={activeMemoryLayersDialog}
-              events={memoryLayerEvents}
               lab={memoryLayersLab}
               loading={loading}
-              day19BriefingLoading={day19BriefingLoading}
-              day19BriefingState={day19BriefingState}
               day20WorkflowLoading={day20WorkflowLoading}
               day20WorkflowState={day20WorkflowState}
               gitMcpLoading={gitMcpLoading}
               gitMcpState={gitMcpState}
-              mcpToolsLoading={mcpToolsLoading}
-              mcpToolsState={mcpToolsState}
               model={model}
               schedulerMcpLoading={schedulerMcpLoading}
               schedulerMcpState={schedulerMcpState}
@@ -2440,11 +2311,10 @@ Solve the task as a group of experts:
               onRename={renameMemoryLayersDialog}
               onSelect={setActiveMemoryLayersDialog}
               onSend={sendMemoryLayersMessage}
+              onTaskRunReset={resetTaskRun}
               onMemoryFolderMove={moveMemoryFolder}
-              onDay19BriefingRun={refreshDay19BriefingTool}
               onDay20WorkflowRun={refreshDay20WorkflowTool}
-              onGitMcpRun={refreshGitMcpTool}
-              onMcpToolsRefresh={refreshMcpTools}
+              onDay20WorkflowReset={resetDay20WorkflowPanel}
               onSchedulerMcpRun={refreshSchedulerMcpTool}
               onProfileApplySuggestion={applyProfileUpdate}
               onProfileApplySuggestions={applyAllProfileUpdates}
@@ -2786,7 +2656,7 @@ function SchedulerSettingsPage({
             onChange={(event) => setSchedulerEnabled(event.target.checked)}
             type="checkbox"
           />
-          Scheduler enabled
+          Background scheduler enabled
         </label>
         <label className="toggle-row">
           <input
@@ -2794,7 +2664,7 @@ function SchedulerSettingsPage({
             onChange={(event) => setTaskEnabled(event.target.checked)}
             type="checkbox"
           />
-          Briefing task enabled
+          Current briefing task enabled
         </label>
         <label>
           Data root
@@ -3451,7 +3321,6 @@ function InvariantsSettingsPage({
           Title
           <input
             onChange={(event) => setTitle(event.target.value)}
-            placeholder="No Java"
             value={title}
           />
         </label>
@@ -3459,7 +3328,6 @@ function InvariantsSettingsPage({
           Description
           <textarea
             onChange={(event) => setDescription(event.target.value)}
-            placeholder="Do not suggest Java for this project."
             rows={3}
             value={description}
           />
@@ -3645,153 +3513,27 @@ function taskStateTitle(state: TaskState) {
   return state.charAt(0).toUpperCase() + state.slice(1);
 }
 
-function schemaFieldSummary(schema: Record<string, unknown>) {
-  const properties = schema.properties;
-  if (!properties || typeof properties !== "object") {
-    return "Input schema: object";
-  }
-
-  const fields = Object.keys(properties);
-  return fields.length
-    ? `Inputs: ${fields.slice(0, 5).join(", ")}${fields.length > 5 ? ", ..." : ""}`
-    : "Inputs: none";
-}
-
-function McpToolsPanel({
+function BranchStatusPill({
   loading,
-  onRefresh,
   state,
 }: {
   loading: boolean;
-  onRefresh: () => void;
-  state: McpToolsState | null;
-}) {
-  const status = state?.connected ? "Connected" : state ? "Failed" : "Not checked";
-
-  return (
-    <section className="mcp-tools-panel">
-      <div className="mcp-tools-head">
-        <div>
-          <span>MCP tools</span>
-          <strong>{status}</strong>
-        </div>
-        <button
-          className="secondary-action"
-          disabled={loading}
-          onClick={onRefresh}
-          type="button"
-        >
-          {loading ? "Refreshing..." : "Refresh"}
-        </button>
-      </div>
-      {state && (
-        <div className="mcp-tools-meta">
-          <span>Server: {state.serverName}</span>
-          <span>Transport: {state.transport}</span>
-          {state.serverVersion && <span>Version: {state.serverVersion}</span>}
-          {state.allowedRoot && <span>Root: {state.allowedRoot}</span>}
-        </div>
-      )}
-      {state?.error && <p className="mcp-tools-error">{state.error}</p>}
-      {state?.connected && (
-        <ul className="mcp-tools-list">
-          {state.tools.map((tool) => (
-            <li key={tool.name}>
-              <strong>{tool.name}</strong>
-              <span>{tool.description || "No description provided."}</span>
-              <small>{schemaFieldSummary(tool.inputSchema)}</small>
-            </li>
-          ))}
-        </ul>
-      )}
-      {state?.connected && state.tools.length === 0 && (
-        <p className="mcp-tools-empty">No tools returned.</p>
-      )}
-    </section>
-  );
-}
-
-function GitMcpToolPanel({
-  loading,
-  onRun,
-  state,
-}: {
-  loading: boolean;
-  onRun: () => void;
   state: GitMcpToolState | null;
 }) {
-  const status = state?.connected ? "Connected" : state ? "Failed" : "Not checked";
-  const repositoryStatus = state?.structuredContent;
-  const changedFiles = repositoryStatus?.changedFiles.slice(0, 6) ?? [];
-  const recentCommits = repositoryStatus?.recentCommits.slice(0, 5) ?? [];
+  const branch = state?.structuredContent?.branch || "unknown";
+  const title = state?.error
+    ? `Git status failed: ${state.error}`
+    : state?.structuredContent
+      ? `Checked at ${formatLocalDateTime(state.checkedAt)}`
+      : "Git status has not been checked yet.";
 
   return (
-    <section className="mcp-tools-panel">
-      <div className="mcp-tools-head">
-        <div>
-          <span>Day 17 Git MCP</span>
-          <strong>{status}</strong>
-        </div>
-        <button
-          className="secondary-action"
-          disabled={loading}
-          onClick={onRun}
-          type="button"
-        >
-          {loading ? "Running..." : "Run Git MCP tool"}
-        </button>
-      </div>
-      {state && (
-        <div className="mcp-tools-meta">
-          <span>Server: {state.serverName}</span>
-          <span>Tool: {state.toolName}</span>
-          <span>Transport: {state.transport}</span>
-          {state.serverVersion && <span>Version: {state.serverVersion}</span>}
-        </div>
-      )}
-      {state?.error && <p className="mcp-tools-error">{state.error}</p>}
-      {repositoryStatus && (
-        <ul className="mcp-tools-list">
-          <li>
-            <strong>Repository</strong>
-            <span>{repositoryStatus.repositoryRoot}</span>
-            <small>Branch: {repositoryStatus.branch || "unknown"}</small>
-            <small>Upstream: {repositoryStatus.upstream || "not set"}</small>
-          </li>
-          <li>
-            <strong>Working tree</strong>
-            <span>{repositoryStatus.isClean ? "Clean" : "Has changes"}</span>
-            <small>Changed files: {repositoryStatus.changedFileCount}</small>
-            <small>
-              Ahead/behind:{" "}
-              {repositoryStatus.ahead === null || repositoryStatus.behind === null
-                ? "n/a"
-                : `${repositoryStatus.ahead}/${repositoryStatus.behind}`}
-            </small>
-          </li>
-          <li>
-            <strong>Changed files</strong>
-            <span className="mcp-tools-preline">
-              {changedFiles.length
-                ? changedFiles
-                    .map((file) => `${file.status}: ${file.path}`)
-                    .join("\n")
-                : "No changed files returned."}
-            </span>
-          </li>
-          <li>
-            <strong>Recent commits</strong>
-            <span className="mcp-tools-preline">
-              {recentCommits.length
-                ? recentCommits
-                    .map((commit) => `${commit.hash}: ${commit.subject}`)
-                    .join("\n")
-                : "No commits returned."}
-            </span>
-          </li>
-        </ul>
-      )}
-    </section>
+    <span
+      className={state?.error ? "branch-status warning" : "branch-status"}
+      title={title}
+    >
+      {loading ? "Branch: checking..." : `Branch: ${branch}`}
+    </span>
   );
 }
 
@@ -3881,7 +3623,7 @@ function SchedulerMcpToolPanel({
             {structured?.schedulerEnabled ? "Enabled" : status}
           </strong>
         </div>
-        <div className="mcp-tools-actions">
+        <div className="task-run-actions">
           <button
             className="secondary-action"
             disabled={loading}
@@ -3996,11 +3738,6 @@ function recordString(value: Record<string, unknown> | null | undefined, key: st
   return typeof item === "string" ? item : null;
 }
 
-function recordNumber(value: Record<string, unknown> | null | undefined, key: string) {
-  const item = value?.[key];
-  return typeof item === "number" && Number.isFinite(item) ? item : null;
-}
-
 function recordObject(value: Record<string, unknown> | null | undefined, key: string) {
   const item = value?.[key];
   return item && typeof item === "object" && !Array.isArray(item)
@@ -4008,139 +3745,15 @@ function recordObject(value: Record<string, unknown> | null | undefined, key: st
     : null;
 }
 
-function Day19BriefingMcpPanel({
-  loading,
-  onRun,
-  state,
-}: {
-  loading: boolean;
-  onRun: (action?: Day19BriefingAction) => void;
-  state: Day19BriefingToolState | null;
-}) {
-  const status = state?.connected ? "Connected" : state ? "Failed" : "Not checked";
-  const structured = state?.structuredContent;
-  const extraction = structured?.extraction;
-  const digest = structured?.digest;
-  const totals = recordObject(digest, "totals");
-  const selectedCount =
-    recordNumber(extraction, "selectedMessageCount") ??
-    recordNumber(totals, "selectedMessageCount") ??
-    0;
-  const totalCached =
-    recordNumber(extraction, "totalCachedMessages") ??
-    recordNumber(totals, "totalCachedMessages") ??
-    0;
-  const digestTitle = recordString(digest, "title") ?? "No digest built yet.";
-  const digestSummary =
-    recordString(digest, "summary") ?? structured?.message ?? "Run the chain to build a digest.";
-  const savedPaths = structured?.savedPaths ?? [];
-  const steps = structured?.steps ?? state?.steps ?? [];
-
-  return (
-    <section className="mcp-tools-panel">
-      <div className="mcp-tools-head">
-        <div>
-          <span>Day 19 Briefing MCP</span>
-          <strong>{status}</strong>
-        </div>
-        <div className="mcp-tools-actions">
-          <button
-            className="secondary-action"
-            disabled={loading}
-            onClick={() => onRun("run_chain")}
-            type="button"
-          >
-            {loading && state?.requestedAction === "run_chain"
-              ? "Running..."
-              : "Run chain"}
-          </button>
-          <button
-            className="secondary-action"
-            disabled={loading}
-            onClick={() => onRun("extract")}
-            type="button"
-          >
-            Extract
-          </button>
-          <button
-            className="secondary-action"
-            disabled={loading}
-            onClick={() => onRun("build")}
-            type="button"
-          >
-            Build digest
-          </button>
-          <button
-            className="secondary-action"
-            disabled={loading}
-            onClick={() => onRun("save")}
-            type="button"
-          >
-            Save digest
-          </button>
-        </div>
-      </div>
-      {state && (
-        <div className="mcp-tools-meta">
-          <span>Server: {state.serverName}</span>
-          <span>Transport: {state.transport}</span>
-          <span>Action: {state.requestedAction}</span>
-          {state.serverVersion && <span>Version: {state.serverVersion}</span>}
-          <span>Checked: {formatLocalDateTime(state.checkedAt)}</span>
-        </div>
-      )}
-      {state?.error && <p className="mcp-tools-error">{state.error}</p>}
-      <ul className="mcp-tools-list">
-        <li>
-          <strong>Tool chain</strong>
-          <span>
-            {"extract_briefing_messages -> build_challenge_digest -> save_challenge_digest"}
-          </span>
-          <small>{structured?.message ?? "Run the chain to call Day 19 MCP tools."}</small>
-        </li>
-        <li>
-          <strong>Extraction</strong>
-          <span>
-            {selectedCount} selected from {totalCached} cached message(s)
-          </span>
-          <small>Data root: {structured?.dataRoot ?? "n/a"}</small>
-        </li>
-        <li>
-          <strong>Digest</strong>
-          <span>{digestTitle}</span>
-          <small>{digestSummary}</small>
-        </li>
-        <li>
-          <strong>Saved files</strong>
-          <span className="mcp-tools-preline">
-            {savedPaths.length ? savedPaths.join("\n") : "No digest saved yet."}
-          </span>
-        </li>
-        <li>
-          <strong>MCP tool call trace</strong>
-          <span className="mcp-tools-preline">
-            {steps.length
-              ? steps
-                  .map(
-                    (step) =>
-                      `${formatLocalDateTime(step.startedAt)} | ${step.status} | ${step.toolName} | ${formatRunDuration(step.durationMs)} | ${step.outputSummary ?? step.error ?? "no details"}`,
-                  )
-                  .join("\n")
-              : "No Day 19 tool calls yet."}
-          </span>
-        </li>
-      </ul>
-    </section>
-  );
-}
-
 function Day20WorkflowMcpPanel({
   loading,
   onRun,
+  onReset,
   state,
 }: {
   loading: boolean;
   onRun: (action?: Day20WorkflowAction) => void;
+  onReset: () => void;
   state: Day20WorkflowToolState | null;
 }) {
   const status = state?.connected ? "Connected" : state ? "Failed" : "Not checked";
@@ -4178,7 +3791,7 @@ function Day20WorkflowMcpPanel({
             onClick={() => onRun("status")}
             type="button"
           >
-            Status
+            Read status
           </button>
           <button
             className="secondary-action"
@@ -4188,7 +3801,7 @@ function Day20WorkflowMcpPanel({
           >
             {loading && state?.requestedAction === "run_workflow"
               ? "Running..."
-              : "Run workflow"}
+              : "Run full workflow"}
           </button>
           <button
             className="secondary-action"
@@ -4196,7 +3809,7 @@ function Day20WorkflowMcpPanel({
             onClick={() => onRun("preview_branch")}
             type="button"
           >
-            Preview branch
+            Preview next branch
           </button>
           <button
             className="secondary-action"
@@ -4211,7 +3824,15 @@ function Day20WorkflowMcpPanel({
             }}
             type="button"
           >
-            Create branch
+            Create next branch
+          </button>
+          <button
+            className="secondary-action"
+            disabled={loading || !state}
+            onClick={onReset}
+            type="button"
+          >
+            Reset panel
           </button>
         </div>
       </div>
@@ -4234,7 +3855,10 @@ function Day20WorkflowMcpPanel({
               "scheduler refresh -> briefing digest -> filesystem read -> git status -> report"
             }
           </span>
-          <small>{structured?.message ?? "Run workflow to orchestrate Day 18-20 MCP tools."}</small>
+          <small>
+            {structured?.message ??
+              "Run workflow to orchestrate scheduler, digest, filesystem, Git, and report steps."}
+          </small>
         </li>
         <li>
           <strong>Report</strong>
@@ -4293,9 +3917,11 @@ function Day20WorkflowMcpPanel({
 
 function TaskRunPanel({
   invariants,
+  onReset,
   taskRun,
 }: {
   invariants: TaskInvariant[];
+  onReset: () => void;
   taskRun: TaskRun | null;
 }) {
   if (!taskRun) {
@@ -4317,6 +3943,38 @@ function TaskRunPanel({
       (invariant.appliesTo.includes(context.state) ||
         invariant.appliesTo.length === 0),
   );
+  const activeInvariantTitles = activeInvariants.map((invariant) => invariant.title);
+  const proposedInvariantTitles = taskRun.pendingTaskInvariants
+    .filter((invariant) => invariant.enabled)
+    .map((invariant) => invariant.title);
+  const externalContextPreview = context.externalContext
+    ? context.externalContext.split("\n").slice(0, 5).join(" | ")
+    : null;
+  const mcpAssignmentStatus = context.externalContext
+    ?.split("\n")
+    .find((line) => line.startsWith("Assignment status:"))
+    ?.replace("Assignment status:", "")
+    .trim();
+  const mcpAssignmentReason = context.externalContext
+    ?.split("\n")
+    .find((line) => line.startsWith("Assignment reason:"))
+    ?.replace("Assignment reason:", "")
+    .trim();
+  const mcpContextSource = context.externalContext
+    ?.split("\n")
+    .find((line) => line.startsWith("Context source:"))
+    ?.replace("Context source:", "")
+    .trim();
+  const mcpCurrentSource = context.externalContext
+    ?.split("\n")
+    .find((line) => line.startsWith("Current source:"))
+    ?.replace("Current source:", "")
+    .trim();
+  const mcpDigestFreshness = context.externalContext
+    ?.split("\n")
+    .find((line) => line.startsWith("Digest freshness:"))
+    ?.replace("Digest freshness:", "")
+    .trim();
   const lastSwarm = taskRun.swarmRuns[taskRun.swarmRuns.length - 1];
 
   return (
@@ -4326,8 +3984,13 @@ function TaskRunPanel({
           <span>Task run</span>
           <strong>{taskStateTitle(context.state)}</strong>
         </div>
-        <div className="task-run-step">
-          Step {context.step}/{context.total}
+        <div className="mcp-tools-actions">
+          <div className="task-run-step">
+            Step {context.step}/{context.total}
+          </div>
+          <button className="secondary-action" onClick={onReset} type="button">
+            Reset task
+          </button>
         </div>
       </div>
       <div className="task-state-track" aria-label="Task lifecycle">
@@ -4354,6 +4017,14 @@ function TaskRunPanel({
           <p>{context.current || "- empty"}</p>
         </article>
         <article>
+          <span>Result kind</span>
+          <p>
+            {context.deliverableKind === "planning_artifact"
+              ? "Planning artifact"
+              : "Implementation"}
+          </p>
+        </article>
+        <article>
           <span>Plan</span>
           <p>{context.plan.length ? context.plan.join(" -> ") : "- empty"}</p>
         </article>
@@ -4362,8 +4033,16 @@ function TaskRunPanel({
           <p>{context.done.length ? context.done.join("; ") : "- empty"}</p>
         </article>
         <article>
-          <span>Invariants</span>
-          <p>{activeInvariants.length} active</p>
+          <span>Active invariants</span>
+          <p>{activeInvariantTitles.length ? activeInvariantTitles.join(", ") : "None"}</p>
+        </article>
+        <article>
+          <span>Proposed invariants</span>
+          <p>
+            {proposedInvariantTitles.length
+              ? proposedInvariantTitles.join(", ")
+              : "None"}
+          </p>
         </article>
         <article>
           <span>Requirements</span>
@@ -4376,6 +4055,26 @@ function TaskRunPanel({
                 ? "Ready for approval"
                 : "- empty"}
           </p>
+        </article>
+        <article>
+          <span>External context</span>
+          <p>{externalContextPreview || "None"}</p>
+        </article>
+        <article>
+          <span>MCP assignment</span>
+          <p>
+            {mcpAssignmentStatus
+              ? `${mcpAssignmentStatus}${
+                  mcpContextSource ? ` via ${mcpContextSource}` : ""
+                }${
+                  mcpDigestFreshness ? `; digest ${mcpDigestFreshness}` : ""
+                }${mcpAssignmentReason ? `: ${mcpAssignmentReason}` : ""}`
+              : "None"}
+          </p>
+        </article>
+        <article>
+          <span>MCP source</span>
+          <p>{mcpCurrentSource || "None"}</p>
         </article>
       </div>
       <div className="task-run-grid">
@@ -4410,17 +4109,12 @@ function TaskRunPanel({
 
 function MemoryLayersView({
   activeDialog,
-  day19BriefingLoading,
-  day19BriefingState,
   day20WorkflowLoading,
   day20WorkflowState,
-  events,
   gitMcpLoading,
   gitMcpState,
   lab,
   loading,
-  mcpToolsLoading,
-  mcpToolsState,
   model,
   schedulerMcpLoading,
   schedulerMcpState,
@@ -4433,11 +4127,10 @@ function MemoryLayersView({
   onRename,
   onSelect,
   onSend,
-  onDay19BriefingRun,
   onDay20WorkflowRun,
-  onGitMcpRun,
+  onDay20WorkflowReset,
+  onTaskRunReset,
   onMemoryFolderMove,
-  onMcpToolsRefresh,
   onSchedulerMcpRun,
   onProfileApplySuggestion,
   onProfileApplySuggestions,
@@ -4452,17 +4145,12 @@ function MemoryLayersView({
   setPrompt,
 }: {
   activeDialog: MemoryDialog | null;
-  day19BriefingLoading: boolean;
-  day19BriefingState: Day19BriefingToolState | null;
   day20WorkflowLoading: boolean;
   day20WorkflowState: Day20WorkflowToolState | null;
-  events: MemoryLayerEvent[];
   gitMcpLoading: boolean;
   gitMcpState: GitMcpToolState | null;
   lab: MemoryLayersState;
   loading: boolean;
-  mcpToolsLoading: boolean;
-  mcpToolsState: McpToolsState | null;
   model: string;
   schedulerMcpLoading: boolean;
   schedulerMcpState: SchedulerMcpToolState | null;
@@ -4475,11 +4163,10 @@ function MemoryLayersView({
   onRename: (dialog: MemoryDialog) => void;
   onSelect: (dialogId: string) => void;
   onSend: (event: FormEvent<HTMLFormElement>) => void;
-  onDay19BriefingRun: (action?: Day19BriefingAction) => void;
   onDay20WorkflowRun: (action?: Day20WorkflowAction) => void;
-  onGitMcpRun: () => void;
+  onDay20WorkflowReset: () => void;
+  onTaskRunReset: () => void;
   onMemoryFolderMove: (memoryFolder: string) => void;
-  onMcpToolsRefresh: () => void;
   onSchedulerMcpRun: (
     action?: SchedulerMcpAction,
     overrides?: Partial<SchedulerMcpRequest>,
@@ -4527,6 +4214,7 @@ function MemoryLayersView({
           <p className="eyebrow">Unified assistant</p>
           <h2>Personalized memory assistant</h2>
         </div>
+        <BranchStatusPill loading={gitMcpLoading} state={gitMcpState} />
         <button
           aria-label="Open assistant settings"
           className="icon-button"
@@ -4592,33 +4280,18 @@ function MemoryLayersView({
         <>
           <TaskRunPanel
             invariants={activeDialogInvariants}
+            onReset={onTaskRunReset}
             taskRun={activeDialog.taskRun}
           />
-          <McpToolsPanel
-            loading={mcpToolsLoading}
-            onRefresh={onMcpToolsRefresh}
-            state={mcpToolsState}
-          />
-          <GitMcpToolPanel
-            loading={gitMcpLoading}
-            onRun={onGitMcpRun}
-            state={gitMcpState}
-          />
-          <SchedulerMcpToolPanel
-            loading={schedulerMcpLoading}
-            onRun={onSchedulerMcpRun}
-            state={schedulerMcpState}
-          />
-          <Day19BriefingMcpPanel
-            loading={day19BriefingLoading}
-            onRun={onDay19BriefingRun}
-            state={day19BriefingState}
-          />
-          <Day20WorkflowMcpPanel
-            loading={day20WorkflowLoading}
-            onRun={onDay20WorkflowRun}
-            state={day20WorkflowState}
-          />
+          <details className="metrics-details mcp-advanced-details">
+            <summary>Advanced MCP diagnostics</summary>
+            <Day20WorkflowMcpPanel
+              loading={day20WorkflowLoading}
+              onRun={onDay20WorkflowRun}
+              onReset={onDay20WorkflowReset}
+              state={day20WorkflowState}
+            />
+          </details>
           <ConversationHistory messages={activeDialog.messages} />
           <div className="branch-summary">
             <span>Active topic: {activeBranch?.title ?? "Main topic"}</span>
@@ -4667,25 +4340,6 @@ function MemoryLayersView({
               </button>
             </div>
           </form>
-
-          <details open className="metrics-details">
-            <summary>Memory routing trace</summary>
-            {events.length === 0 ? (
-              <div className="empty">
-                Send a message to see how memory was routed.
-              </div>
-            ) : (
-              <ol className="trace-list">
-                {events.map((event, index) => (
-                  <li key={`${event.layer}-${event.action}-${index}`}>
-                    <strong>{event.layer}</strong>
-                    <span>{event.action}</span>
-                    <pre>{`${event.detail}\n${event.filePath}`}</pre>
-                  </li>
-                ))}
-              </ol>
-            )}
-          </details>
         </>
       )}
       {settingsOpen && (

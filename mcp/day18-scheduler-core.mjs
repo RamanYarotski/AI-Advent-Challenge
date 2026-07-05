@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -143,9 +143,157 @@ function schedulerPaths(dataRoot) {
     runs: path.join(dataRoot, "scheduler", "runs.json"),
     messagesCache: path.join(dataRoot, "briefings", "messages-cache.json"),
     latestAggregate: path.join(dataRoot, "briefings", "latest-aggregate.json"),
+    latestExtraction: path.join(dataRoot, "briefings", "latest-extraction.json"),
+    latestDigestDraft: path.join(dataRoot, "briefings", "latest-digest-draft.json"),
     digests: path.join(dataRoot, "briefings", "digests"),
+    latestChallengeDigestJson: path.join(
+      dataRoot,
+      "briefings",
+      "digests",
+      "latest-challenge-digest.json",
+    ),
+    latestChallengeDigestMarkdown: path.join(
+      dataRoot,
+      "briefings",
+      "digests",
+      "latest-challenge-digest.md",
+    ),
     reports: path.join(dataRoot, "reports"),
+    latestDay20ReportJson: path.join(
+      dataRoot,
+      "reports",
+      "latest-day20-orchestration.json",
+    ),
+    latestDay20ReportMarkdown: path.join(
+      dataRoot,
+      "reports",
+      "latest-day20-orchestration.md",
+    ),
   };
+}
+
+function comparablePath(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return "";
+  }
+  const normalized = path.normalize(value.trim());
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function sourceIdentity(value) {
+  const source = normalizeSource(value);
+  return {
+    sourceType: source.sourceType,
+    parserPreset: source.parserPreset,
+    path: comparablePath(source.path),
+  };
+}
+
+function sourceOrProfileChanged(previousState, nextSource, nextProfile) {
+  return (
+    stableJson(sourceIdentity(previousState.source)) !==
+      stableJson(sourceIdentity(nextSource)) ||
+    stableJson(normalizeBriefingProfile(previousState.briefingProfile)) !==
+      stableJson(normalizeBriefingProfile(nextProfile))
+  );
+}
+
+async function removeFileIfPresent(filePath) {
+  try {
+    await unlink(filePath);
+    return filePath;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function invalidateLatestDerivedArtifacts(paths) {
+  const removed = await Promise.all(
+    [
+      paths.latestExtraction,
+      paths.latestDigestDraft,
+      paths.latestChallengeDigestJson,
+      paths.latestChallengeDigestMarkdown,
+      paths.latestDay20ReportJson,
+      paths.latestDay20ReportMarkdown,
+    ].map(removeFileIfPresent),
+  );
+  return removed.filter(Boolean);
+}
+
+function exactTargetDays(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return Array.from(
+    new Set(
+      value
+        .map((item) => Number.parseInt(String(item ?? ""), 10))
+        .filter((item) => Number.isFinite(item) && item > 0 && item < 100),
+    ),
+  ).sort((left, right) => left - right);
+}
+
+function sameExactTargetDays(left, right) {
+  const leftDays = exactTargetDays(left);
+  const rightDays = exactTargetDays(right);
+  return (
+    leftDays.length === rightDays.length &&
+    leftDays.every((day, index) => day === rightDays[index])
+  );
+}
+
+function latestArtifactSourcePath(artifact) {
+  if (!isRecord(artifact)) {
+    return "";
+  }
+  const digestSummary = isRecord(artifact.digestSummary)
+    ? artifact.digestSummary
+    : {};
+  return (
+    (typeof artifact.sourcePath === "string" && artifact.sourcePath) ||
+    (typeof digestSummary.sourcePath === "string" && digestSummary.sourcePath) ||
+    ""
+  );
+}
+
+async function latestDerivedArtifactsStale(paths, source, profile) {
+  const artifactPaths = [
+    paths.latestExtraction,
+    paths.latestDigestDraft,
+    paths.latestChallengeDigestJson,
+    paths.latestDay20ReportJson,
+  ];
+  const currentSourcePath = comparablePath(source.path);
+  const currentTargetDays = profile.targetDays;
+
+  for (const artifactPath of artifactPaths) {
+    const artifact = await readJsonFile(artifactPath, null);
+    if (!isRecord(artifact)) {
+      continue;
+    }
+
+    const artifactSourcePath = latestArtifactSourcePath(artifact);
+    if (
+      artifactSourcePath &&
+      currentSourcePath &&
+      comparablePath(artifactSourcePath) !== currentSourcePath
+    ) {
+      return true;
+    }
+
+    if (
+      Array.isArray(artifact.targetDays) &&
+      !sameExactTargetDays(artifact.targetDays, currentTargetDays)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 async function readJsonFile(filePath, fallback) {
@@ -639,6 +787,14 @@ async function appendRun(paths, run) {
 async function runTask({ taskId = DEFAULT_TASK_ID, force = false, dataRoot, note }) {
   const { state, paths } = await readState(dataRoot);
   const task = state.tasks.find((item) => item.id === taskId) ?? state.tasks[0];
+  const latestDerivedStale = await latestDerivedArtifactsStale(
+    paths,
+    normalizeSource(task.args.source),
+    normalizeBriefingProfile(task.args.briefingProfile),
+  );
+  if (latestDerivedStale) {
+    await invalidateLatestDerivedArtifacts(paths);
+  }
   const startedAt = Date.now();
   const run = {
     id: makeId("mcp-run"),
@@ -828,7 +984,18 @@ export async function upsertScheduledTask(input = {}) {
     tasks: [nextTask],
     updatedAt,
   };
+  const shouldInvalidateDerived = sourceOrProfileChanged(
+    state,
+    source,
+    briefingProfile,
+  );
   const paths = await writeState(nextState);
+  const staleLatestDerived = shouldInvalidateDerived
+    ? false
+    : await latestDerivedArtifactsStale(paths, source, briefingProfile);
+  const invalidatedLatestArtifacts = shouldInvalidateDerived || staleLatestDerived
+    ? await invalidateLatestDerivedArtifacts(paths)
+    : [];
   const runsFile = await readJsonFile(paths.runs, { runs: [] });
   const aggregate = await readJsonFile(paths.latestAggregate, null);
   return publicStatePayload({
@@ -836,7 +1003,9 @@ export async function upsertScheduledTask(input = {}) {
     paths,
     runs: Array.isArray(runsFile.runs) ? runsFile.runs : [],
     aggregate,
-    message: "Scheduler settings saved.",
+    message: shouldInvalidateDerived || staleLatestDerived
+      ? "Scheduler settings saved. Derived latest briefing artifacts were invalidated after a source/profile change or stale latest source."
+      : "Scheduler settings saved.",
   });
 }
 
