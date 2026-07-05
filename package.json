@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "scheduler:worker": "node mcp/day18-scheduler-worker.mjs",
+    "rag:day21": "node scripts/rag-all.mjs day21",
     "lint": "eslint ."
   },
   "dependencies": {
