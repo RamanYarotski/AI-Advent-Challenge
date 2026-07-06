@@ -20,7 +20,8 @@ It exposes the Day 21 source and indexing controls too, so it can rebuild the in
 - `topK`: `8` by default.
 - `generationMode`: `local` by default, `llm` optional with local fallback.
 - `model`, `temperature`, and `maxTokens` can be passed for live LLM generation.
-- Day 21 upstream controls: `sourcesText`, `fixedTokens`, `overlapTokens`, `maxStructuralTokens`, `embeddingMode`, and optional `rebuildIndex`.
+- Day 21 upstream controls: enabled Source Manager records, source-specific crawl limits, `fixedTokens`, `overlapTokens`, `maxStructuralTokens`, `embeddingMode`, and optional `rebuildIndex`.
+- `sourcesText` remains available only for low-level API/CLI compatibility.
 
 ## Control Questions
 

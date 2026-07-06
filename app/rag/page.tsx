@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
 
 type RagStatus = {
@@ -26,6 +26,38 @@ type RagStatus = {
       updatedAt: string;
     };
   };
+};
+
+type SourceType = "upload" | "url" | "site" | "github" | "local_path";
+
+type ManagedSource = {
+  id: string;
+  type: SourceType;
+  label: string;
+  value: string;
+  enabled: boolean;
+  status: string;
+  warning: string | null;
+  error: string | null;
+  documentCount: number;
+  lastIndexedAt: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+type SourceState = {
+  sources: ManagedSource[];
+  updatedAt: string;
+};
+
+type ArtifactKey = "day21_report" | "manifest" | "fixed_index" | "structural_index";
+
+type RagArtifact = {
+  key: ArtifactKey;
+  label: string;
+  fileName: string;
+  contentType: string;
+  path: string;
+  content: string;
 };
 
 type IndexResult = {
@@ -138,14 +170,36 @@ type RagChatResult = {
   };
 };
 
-const defaultSourcesText = [
-  "README.md",
-  "docs",
-  "lib",
-  "app/api",
-  "mcp",
-  "docs/rag-week-chat-notes.md",
-].join("\n");
+const sourceTypeLabels: Record<SourceType, string> = {
+  upload: "Upload",
+  url: "URL",
+  site: "Site",
+  github: "GitHub",
+  local_path: "Local path",
+};
+
+const artifactLinks: Array<{ key: ArtifactKey; label: string }> = [
+  { key: "day21_report", label: "Report" },
+  { key: "manifest", label: "Manifest" },
+  { key: "fixed_index", label: "Fixed index JSON" },
+  { key: "structural_index", label: "Structural index JSON" },
+];
+
+const sourcePlaceholders: Record<SourceType, string> = {
+  upload: "",
+  url: "https://example.com/article.html",
+  site: "https://example.com/docs",
+  github: "https://github.com/owner/repo",
+  local_path: "docs or C:\\path\\to\\folder",
+};
+
+const sourceValueLabels: Record<SourceType, string> = {
+  upload: "Upload",
+  url: "Source URL",
+  site: "Site URL",
+  github: "GitHub URL",
+  local_path: "Server path",
+};
 
 export default function RagWeekPage() {
   const [activeStage, setActiveStage] = useState<
@@ -164,7 +218,21 @@ export default function RagWeekPage() {
   const [overlapTokens, setOverlapTokens] = useState("120");
   const [maxStructuralTokens, setMaxStructuralTokens] = useState("1200");
   const [embeddingMode, setEmbeddingMode] = useState("local_hash");
-  const [sourcesText, setSourcesText] = useState(defaultSourcesText);
+  const [siteMaxDepth, setSiteMaxDepth] = useState("1");
+  const [siteMaxPages, setSiteMaxPages] = useState("20");
+  const [siteMaxBytesPerPage, setSiteMaxBytesPerPage] = useState("1000000");
+  const [githubMaxFiles, setGithubMaxFiles] = useState("120");
+  const [sources, setSources] = useState<ManagedSource[]>([]);
+  const [sourcesLoading, setSourcesLoading] = useState(false);
+  const [sourcesDirty, setSourcesDirty] = useState(false);
+  const [sourceError, setSourceError] = useState<string | null>(null);
+  const [sourceType, setSourceType] = useState<SourceType>("upload");
+  const [sourceLabel, setSourceLabel] = useState("");
+  const [sourceValue, setSourceValue] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [artifact, setArtifact] = useState<RagArtifact | null>(null);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
   const [rebuildIndex, setRebuildIndex] = useState(false);
   const [question, setQuestion] = useState(
     "Что должен делать RAG ассистент при слабом контексте?",
@@ -195,21 +263,44 @@ export default function RagWeekPage() {
     return payload as RagStatus;
   }
 
+  async function loadSources() {
+    const response = await fetch("/api/rag/sources");
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Failed to load sources.");
+    }
+    return payload as SourceState;
+  }
+
   async function refreshStatus() {
     setStatus(await loadStatus());
+  }
+
+  async function refreshSources(options: { markClean?: boolean } = {}) {
+    const payload = await loadSources();
+    setSources(payload.sources);
+    if (options.markClean) {
+      setSourcesDirty(false);
+    }
   }
 
   useEffect(() => {
     let cancelled = false;
     async function loadInitialStatus() {
       try {
-        const payload = await loadStatus();
+        setSourcesLoading(true);
+        const [statusPayload, sourcePayload] = await Promise.all([loadStatus(), loadSources()]);
         if (!cancelled) {
-          setStatus(payload);
+          setStatus(statusPayload);
+          setSources(sourcePayload.sources);
         }
       } catch (nextError) {
         if (!cancelled) {
           setError(nextError instanceof Error ? nextError.message : "Failed to load status.");
+        }
+      } finally {
+        if (!cancelled) {
+          setSourcesLoading(false);
         }
       }
     }
@@ -219,21 +310,181 @@ export default function RagWeekPage() {
     };
   }, []);
 
+  async function addSource() {
+    const value = sourceValue.trim();
+    if (!value) {
+      setSourceError("Source value is required.");
+      return;
+    }
+    if ((sourceType === "url" || sourceType === "site" || sourceType === "github") && !/^https?:\/\//i.test(value)) {
+      setSourceError("URL, site, and GitHub sources must start with http:// or https://.");
+      return;
+    }
+    setSourcesLoading(true);
+    setSourceError(null);
+    try {
+      const response = await fetch("/api/rag/sources", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: sourceType,
+          label: sourceLabel.trim() || undefined,
+          value,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "Failed to add source.");
+      }
+      setSources(payload.state.sources);
+      setSourceLabel("");
+      setSourceValue("");
+      setSourcesDirty(true);
+    } catch (nextError) {
+      setSourceError(nextError instanceof Error ? nextError.message : "Failed to add source.");
+    } finally {
+      setSourcesLoading(false);
+    }
+  }
+
+  async function updateSource(id: string, patch: Partial<ManagedSource>) {
+    setSourcesLoading(true);
+    setSourceError(null);
+    try {
+      const response = await fetch("/api/rag/sources", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, patch }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "Failed to update source.");
+      }
+      setSources(payload.state.sources);
+      setSourcesDirty(true);
+    } catch (nextError) {
+      setSourceError(nextError instanceof Error ? nextError.message : "Failed to update source.");
+    } finally {
+      setSourcesLoading(false);
+    }
+  }
+
+  async function deleteSource(id: string) {
+    setSourcesLoading(true);
+    setSourceError(null);
+    try {
+      const response = await fetch("/api/rag/sources", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "Failed to delete source.");
+      }
+      setSources(payload.state.sources);
+      setSourcesDirty(true);
+    } catch (nextError) {
+      setSourceError(nextError instanceof Error ? nextError.message : "Failed to delete source.");
+    } finally {
+      setSourcesLoading(false);
+    }
+  }
+
+  async function uploadFiles(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length) {
+      return;
+    }
+    setUploading(true);
+    setSourceError(null);
+    try {
+      const formData = new FormData();
+      for (const file of files) {
+        formData.append("files", file);
+      }
+      const response = await fetch("/api/rag/sources/upload", {
+        method: "POST",
+        body: formData,
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "Upload failed.");
+      }
+      setSources(payload.state.sources);
+      setSourcesDirty(true);
+      if (payload.rejected?.length) {
+        setSourceError(
+          payload.rejected
+            .map((item: { name: string; reason: string }) => `${item.name}: ${item.reason}`)
+            .join(" "),
+        );
+      }
+    } catch (nextError) {
+      setSourceError(nextError instanceof Error ? nextError.message : "Upload failed.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function loadArtifact(key: ArtifactKey) {
+    setArtifactLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/rag/artifacts?key=${encodeURIComponent(key)}`);
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "Artifact read failed.");
+      }
+      setArtifact(payload);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Artifact read failed.");
+    } finally {
+      setArtifactLoading(false);
+    }
+  }
+
+  async function resetRagData() {
+    if (!window.confirm("Reset all RAG data, indexes, reports, chats, sources, and uploads?")) {
+      return;
+    }
+    setResetLoading(true);
+    setError(null);
+    setArtifact(null);
+    try {
+      const response = await fetch("/api/rag/reset", {
+        method: "POST",
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "RAG reset failed.");
+      }
+      setResult(null);
+      setQueryResult(null);
+      setRerankResult(null);
+      setCitedResult(null);
+      setChatResult(null);
+      setSources(payload.state.sources);
+      setSourcesDirty(false);
+      await refreshStatus();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "RAG reset failed.");
+    } finally {
+      setResetLoading(false);
+    }
+  }
+
   async function runIndexing(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
     setError(null);
     try {
+      assertRunnableSources();
       const response = await fetch("/api/rag/index", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sourcesText,
-          fixedTokens: Number(fixedTokens),
-          overlapTokens: Number(overlapTokens),
-          maxStructuralTokens: Number(maxStructuralTokens),
-          embeddingMode,
-        }),
+        body: JSON.stringify(indexPipelinePayload()),
       });
       const payload = await response.json();
       if (!response.ok) {
@@ -241,6 +492,7 @@ export default function RagWeekPage() {
       }
       setResult(payload);
       await refreshStatus();
+      await refreshSources({ markClean: true });
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Indexing failed.");
     } finally {
@@ -253,6 +505,7 @@ export default function RagWeekPage() {
     setQueryLoading(true);
     setError(null);
     try {
+      assertRunnableSources();
       const response = await fetch("/api/rag/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -270,6 +523,10 @@ export default function RagWeekPage() {
       }
       setQueryResult(payload);
       setActiveStage("day22");
+      if (rebuildIndex) {
+        await refreshSources({ markClean: true });
+        await refreshStatus();
+      }
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "RAG query failed.");
     } finally {
@@ -282,6 +539,7 @@ export default function RagWeekPage() {
     setQueryLoading(true);
     setError(null);
     try {
+      assertRunnableSources();
       const response = await fetch("/api/rag/rerank", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -302,6 +560,10 @@ export default function RagWeekPage() {
       }
       setRerankResult(payload);
       setActiveStage("day23");
+      if (rebuildIndex) {
+        await refreshSources({ markClean: true });
+        await refreshStatus();
+      }
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Rerank query failed.");
     } finally {
@@ -314,6 +576,7 @@ export default function RagWeekPage() {
     setQueryLoading(true);
     setError(null);
     try {
+      assertRunnableSources();
       const response = await fetch("/api/rag/cited-answer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -335,6 +598,10 @@ export default function RagWeekPage() {
       }
       setCitedResult(payload);
       setActiveStage("day24");
+      if (rebuildIndex) {
+        await refreshSources({ markClean: true });
+        await refreshStatus();
+      }
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Cited answer failed.");
     } finally {
@@ -347,6 +614,7 @@ export default function RagWeekPage() {
     setQueryLoading(true);
     setError(null);
     try {
+      assertRunnableSources();
       const response = await fetch("/api/rag/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -370,6 +638,10 @@ export default function RagWeekPage() {
       setChatResult(payload);
       setChatMessage("");
       setActiveStage("day25");
+      if (rebuildIndex) {
+        await refreshSources({ markClean: true });
+        await refreshStatus();
+      }
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "RAG chat failed.");
     } finally {
@@ -381,13 +653,29 @@ export default function RagWeekPage() {
   const latestSources = status?.manifest?.day21?.sourceSummaries ?? [];
   const latestWarnings = status?.manifest?.day21?.warnings ?? [];
 
+  function hasRunnableSources() {
+    return sources.some((source) => source.enabled);
+  }
+
+  function assertRunnableSources() {
+    if (sourcesLoading) {
+      throw new Error("Sources are still loading.");
+    }
+    if (!hasRunnableSources()) {
+      throw new Error("Add or enable at least one source before running RAG.");
+    }
+  }
+
   function indexPipelinePayload() {
     return {
-      sourcesText,
       fixedTokens: Number(fixedTokens),
       overlapTokens: Number(overlapTokens),
       maxStructuralTokens: Number(maxStructuralTokens),
       embeddingMode,
+      siteMaxDepth: Number(siteMaxDepth),
+      siteMaxPages: Number(siteMaxPages),
+      siteMaxBytesPerPage: Number(siteMaxBytesPerPage),
+      githubMaxFiles: Number(githubMaxFiles),
       rebuildIndex,
     };
   }
@@ -401,19 +689,207 @@ export default function RagWeekPage() {
     };
   }
 
+  function latestSummaryFor(source: ManagedSource) {
+    return latestSources.find(
+      (summary) =>
+        summary.input === source.value ||
+        summary.input === source.metadata?.relativeValue ||
+        summary.input.startsWith(`${source.value}#`),
+    );
+  }
+
+  function sourceTypeLabel(type: string) {
+    return sourceTypeLabels[type as SourceType] ?? type;
+  }
+
+  function renderSourceManager() {
+    const enabledCount = sources.filter((source) => source.enabled).length;
+
+    return (
+      <div className="rag-source-manager">
+        <div className="rag-source-manager-head">
+          <div>
+            <strong>Add source</strong>
+            <span>Select files, URLs, sites, GitHub repos, or server paths for indexing.</span>
+          </div>
+          {sourcesDirty && <span className="rag-source-dirty">Rebuild index to apply changes</span>}
+        </div>
+
+        <div className="rag-source-editor">
+          <label>
+            Type
+            <select
+              onChange={(event) => setSourceType(event.target.value as SourceType)}
+              value={sourceType}
+            >
+              <option value="upload">Upload files</option>
+              <option value="url">Single URL/file</option>
+              <option value="site">Site crawl</option>
+              <option value="github">GitHub repo/tree/blob</option>
+              <option value="local_path">Local path</option>
+            </select>
+          </label>
+          {sourceType !== "upload" && (
+            <>
+              <label>
+                {sourceValueLabels[sourceType]}
+                <input
+                  onChange={(event) => setSourceValue(event.target.value)}
+                  placeholder={sourcePlaceholders[sourceType]}
+                  value={sourceValue}
+                />
+              </label>
+              <label>
+                Label
+                <input
+                  onChange={(event) => setSourceLabel(event.target.value)}
+                  placeholder="Optional"
+                  value={sourceLabel}
+                />
+              </label>
+              <button disabled={sourcesLoading} onClick={addSource} type="button">
+                Add
+              </button>
+            </>
+          )}
+        </div>
+
+        {sourceType === "upload" && (
+          <label className="rag-upload">
+            <span>{uploading ? "Uploading..." : "Upload files"}</span>
+            <input
+              accept=".md,.mdx,.txt,.json,.csv,.html,.htm,.pdf,.js,.jsx,.mjs,.ts,.tsx,.css"
+              disabled={uploading}
+              multiple
+              onChange={uploadFiles}
+              type="file"
+            />
+          </label>
+        )}
+
+        {sourceType === "site" && (
+          <div className="rag-source-options">
+            <label>
+              Site max depth
+              <input
+                inputMode="numeric"
+                onChange={(event) => setSiteMaxDepth(event.target.value)}
+                value={siteMaxDepth}
+              />
+            </label>
+            <label>
+              Site max pages
+              <input
+                inputMode="numeric"
+                onChange={(event) => setSiteMaxPages(event.target.value)}
+                value={siteMaxPages}
+              />
+            </label>
+            <label>
+              Site bytes/page
+              <input
+                inputMode="numeric"
+                onChange={(event) => setSiteMaxBytesPerPage(event.target.value)}
+                value={siteMaxBytesPerPage}
+              />
+            </label>
+          </div>
+        )}
+
+        {sourceType === "github" && (
+          <div className="rag-source-options">
+            <label>
+              GitHub max files
+              <input
+                inputMode="numeric"
+                onChange={(event) => setGithubMaxFiles(event.target.value)}
+                value={githubMaxFiles}
+              />
+            </label>
+          </div>
+        )}
+
+        {sourceType === "local_path" && (
+          <p className="rag-source-hint">
+            Server paths are read by the running app process, not by the browser. Use Upload files for
+            files from your computer.
+          </p>
+        )}
+
+        {sourceError && <p className="rag-source-validation">{sourceError}</p>}
+
+        <div className="rag-source-list-head">
+          <strong>Sources to index</strong>
+          <span>{enabledCount} enabled</span>
+        </div>
+
+        <div className="rag-source-list">
+          {sources.length === 0 && (
+            <div className="rag-source-empty">
+              {sourcesLoading
+                ? "Sources are loading."
+                : "No sources to index yet. Upload files or add a URL, site, GitHub source, or local path."}
+            </div>
+          )}
+          {sources.map((source) => {
+            const summary = latestSummaryFor(source);
+            const warning = source.warning || summary?.warning || source.error;
+            const documentCount = summary?.documentCount ?? source.documentCount;
+            const statusLabel = warning
+              ? "warning"
+              : source.lastIndexedAt || summary
+                ? "indexed"
+                : source.status || "ready";
+            return (
+              <div
+                className={`rag-source-row ${source.enabled ? "" : "disabled"} ${warning ? "warning" : statusLabel}`}
+                key={source.id}
+              >
+                <label className="rag-source-toggle">
+                  <input
+                    checked={source.enabled}
+                    onChange={(event) => updateSource(source.id, { enabled: event.target.checked })}
+                    type="checkbox"
+                  />
+                </label>
+                <div className="rag-source-main">
+                  <div className="rag-source-title">
+                    <span className="rag-source-kind">{sourceTypeLabels[source.type]}</span>
+                    <strong>{source.label}</strong>
+                  </div>
+                  <code>{source.value}</code>
+                  <span className="rag-source-status">
+                    {statusLabel}
+                    <span className="rag-source-count">{documentCount} document(s)</span>
+                    {source.lastIndexedAt ? <span>{source.lastIndexedAt}</span> : null}
+                  </span>
+                  {warning ? <p>{warning}</p> : null}
+                </div>
+                <div className="rag-source-actions">
+                  <button
+                    onClick={() => updateSource(source.id, { enabled: !source.enabled })}
+                    type="button"
+                  >
+                    {source.enabled ? "Disable" : "Enable"}
+                  </button>
+                  <button className="danger-action" onClick={() => deleteSource(source.id)} type="button">
+                    Remove
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+      </div>
+    );
+  }
+
   function renderPipelineControls(options: { allowRebuild: boolean }) {
     return (
       <details className="rag-pipeline" open>
         <summary>Pipeline parameters</summary>
-        <label className="rag-textarea-label">
-          Sources
-          <textarea
-            onChange={(event) => setSourcesText(event.target.value)}
-            placeholder="One source per line: docs, README.md, C:\path\repo, https://example.com/page, https://github.com/owner/repo"
-            rows={6}
-            value={sourcesText}
-          />
-        </label>
+        {renderSourceManager()}
         <div className="rag-control-grid">
           <label>
             Fixed chunk tokens
@@ -460,9 +936,9 @@ export default function RagWeekPage() {
             Rebuild index before running this stage
           </label>
         )}
-        {latestSources.length > 0 && (
+        {false && latestSources.length > 0 && (
           <details className="rag-source-profile">
-            <summary>Current index sources</summary>
+            <summary>Indexed sections</summary>
             {latestSources.map((source) => (
               <div className="rag-source" key={`${source.type}-${source.input}`}>
                 <strong>{source.type}</strong>
@@ -482,6 +958,85 @@ export default function RagWeekPage() {
           </div>
         )}
       </details>
+    );
+  }
+
+  function artifactContent() {
+    if (!artifact) {
+      return "";
+    }
+    if (artifact.contentType.includes("json")) {
+      try {
+        return JSON.stringify(JSON.parse(artifact.content), null, 2);
+      } catch {
+        return artifact.content;
+      }
+    }
+    return artifact.content;
+  }
+
+  function renderIndexArtifacts() {
+    return (
+      <details className="rag-artifacts">
+        <summary>Index artifacts</summary>
+        <div className="rag-artifact-list">
+          {artifactLinks.map((item) => (
+            <div className="rag-artifact-row" key={item.key}>
+              <strong>{item.label}</strong>
+              <div>
+                <button
+                  disabled={artifactLoading}
+                  onClick={() => loadArtifact(item.key)}
+                  type="button"
+                >
+                  View
+                </button>
+                <a href={`/api/rag/artifacts?key=${item.key}&download=1`}>Download</a>
+              </div>
+            </div>
+          ))}
+        </div>
+        {artifact && (
+          <div className="rag-artifact-viewer">
+            <div>
+              <strong>{artifact.label}</strong>
+              <span>{artifact.path}</span>
+            </div>
+            <pre>{artifactContent()}</pre>
+          </div>
+        )}
+      </details>
+    );
+  }
+
+  function renderIndexedSections() {
+    if (!latestSources.length) {
+      return null;
+    }
+    return (
+      <section className="rag-indexed-sections">
+        <div className="rag-indexed-sections-head">
+          <strong>Indexed sections</strong>
+          <span>{latestSources.length} source group(s)</span>
+        </div>
+        <div className="rag-indexed-section-list">
+          {latestSources.map((source) => (
+            <div
+              className={`rag-indexed-section ${source.warning ? "warning" : ""}`}
+              key={`${source.type}-${source.input}`}
+            >
+              <div>
+                <span className="rag-source-kind">{sourceTypeLabel(source.type)}</span>
+                <strong>{source.input}</strong>
+              </div>
+              <span>
+                {source.documentCount} document(s)
+                {source.warning ? ` - ${source.warning}` : ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      </section>
     );
   }
 
@@ -543,9 +1098,19 @@ export default function RagWeekPage() {
               <span>{status?.manifest?.day21?.embeddingProvider ?? "not indexed"}</span>
             </div>
             {renderPipelineControls({ allowRebuild: false })}
-            <button className="run" disabled={loading} type="submit">
-              {loading ? "Indexing..." : "Build indexes"}
-            </button>
+            <div className="rag-form-actions">
+              <button className="run" disabled={loading || resetLoading} type="submit">
+                {loading ? "Indexing..." : "Build indexes"}
+              </button>
+              <button
+                className="danger-action"
+                disabled={loading || resetLoading}
+                onClick={resetRagData}
+                type="button"
+              >
+                {resetLoading ? "Resetting..." : "Reset RAG data"}
+              </button>
+            </div>
             {error && <p className="rag-error">{error}</p>}
           </form>
 
@@ -578,9 +1143,21 @@ export default function RagWeekPage() {
                 </article>
                 <p>{latest.recommendation}</p>
                 {result && <p>Report: {result.reportPath}</p>}
+                {renderIndexedSections()}
+                {renderIndexArtifacts()}
               </div>
             ) : (
-              <div className="empty">No index has been built yet.</div>
+              <div className="empty">
+                No index has been built yet.
+                <button
+                  className="danger-action"
+                  disabled={resetLoading}
+                  onClick={resetRagData}
+                  type="button"
+                >
+                  {resetLoading ? "Resetting..." : "Reset RAG data"}
+                </button>
+              </div>
             )}
           </section>
         </section>

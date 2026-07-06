@@ -24,7 +24,8 @@ It keeps the full upstream controls from Day 21 and Day 23, then adds citation a
 - `threshold`: defaults to `minScore`.
 - `minLexicalOverlap`: `0.08` by default.
 - `useRewrite`: enabled by default.
-- Day 21 upstream controls: `sourcesText`, `fixedTokens`, `overlapTokens`, `maxStructuralTokens`, `embeddingMode`, and optional `rebuildIndex`.
+- Day 21 upstream controls: enabled Source Manager records, source-specific crawl limits, `fixedTokens`, `overlapTokens`, `maxStructuralTokens`, `embeddingMode`, and optional `rebuildIndex`.
+- `sourcesText` remains available only for low-level API/CLI compatibility.
 
 ## Acceptance Checks
 

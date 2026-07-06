@@ -234,6 +234,356 @@
   padding: 8px 10px;
 }
 
+.rag-source-manager {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.rag-source-manager-head {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.rag-source-manager-head div {
+  display: grid;
+  gap: 2px;
+}
+
+.rag-source-manager-head span,
+.rag-source-status,
+.rag-source-empty {
+  color: #667085;
+  font-size: 12px;
+}
+
+.rag-source-dirty,
+.rag-source-validation {
+  background: #fffaeb;
+  border: 1px solid #fedf89;
+  border-radius: 6px;
+  color: #93370d;
+  margin: 0;
+  padding: 7px 9px;
+}
+
+.rag-upload {
+  align-items: center;
+  border: 1px dashed #98a2b3;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  min-height: 44px;
+  padding: 10px;
+  text-align: center;
+}
+
+.rag-upload input {
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+  position: absolute;
+  width: 1px;
+}
+
+.rag-source-editor {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(180px, 1.4fr) minmax(130px, 1fr) auto;
+}
+
+.rag-source-editor label {
+  color: #4a5568;
+  display: grid;
+  font-size: 13px;
+  gap: 6px;
+}
+
+.rag-source-editor input,
+.rag-source-editor select {
+  border: 1px solid #cfd5df;
+  border-radius: 6px;
+  color: #15171a;
+  min-height: 40px;
+  min-width: 0;
+  padding: 0 10px;
+  width: 100%;
+}
+
+.rag-source-editor button,
+.rag-source-actions button {
+  border: 1px solid #cfd5df;
+  border-radius: 6px;
+  background: #fff;
+  color: #15171a;
+  cursor: pointer;
+  min-height: 40px;
+  padding: 0 10px;
+}
+
+.rag-source-options {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.rag-source-options label {
+  color: #4a5568;
+  display: grid;
+  font-size: 13px;
+  gap: 6px;
+}
+
+.rag-source-options input {
+  border: 1px solid #cfd5df;
+  border-radius: 6px;
+  color: #15171a;
+  min-height: 40px;
+  min-width: 0;
+  padding: 0 10px;
+  width: 100%;
+}
+
+.rag-source-hint {
+  background: #f8fafc;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  color: #475467;
+  font-size: 13px;
+  margin: 0;
+  padding: 10px;
+}
+
+.rag-source-list {
+  display: grid;
+  gap: 8px;
+}
+
+.rag-source-list-head,
+.rag-indexed-sections-head {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.rag-source-list-head span,
+.rag-indexed-sections-head span {
+  color: #667085;
+  font-size: 12px;
+}
+
+.rag-source-empty {
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.rag-source-row {
+  align-items: flex-start;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  padding: 10px;
+}
+
+.rag-source-row.disabled {
+  opacity: 0.62;
+}
+
+.rag-source-row.warning {
+  border-color: #fedf89;
+  background: #fffcf5;
+}
+
+.rag-source-toggle {
+  padding-top: 3px;
+}
+
+.rag-source-main {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.rag-source-title {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.rag-source-kind {
+  background: #eef7f5;
+  border: 1px solid #cce8e3;
+  border-radius: 999px;
+  color: #0b5f59;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 3px 7px;
+  text-transform: uppercase;
+}
+
+.rag-source-main code {
+  color: #344054;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.rag-source-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.rag-source-count {
+  color: #344054;
+}
+
+.rag-source-main p {
+  color: #93370d;
+  font-size: 12px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.rag-source-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.rag-form-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.rag-form-actions .run {
+  min-width: 160px;
+}
+
+.rag-indexed-sections {
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-column: 1 / -1;
+  padding: 10px;
+}
+
+.rag-indexed-section-list {
+  display: grid;
+  gap: 8px;
+}
+
+.rag-indexed-section {
+  border-top: 1px solid #edf0f5;
+  display: grid;
+  gap: 5px;
+  padding-top: 8px;
+}
+
+.rag-indexed-section.warning {
+  color: #93370d;
+}
+
+.rag-indexed-section div {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+.rag-indexed-section strong,
+.rag-indexed-section span {
+  overflow-wrap: anywhere;
+}
+
+.rag-indexed-section > span {
+  color: #667085;
+  font-size: 12px;
+}
+
+.rag-artifacts {
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  grid-column: 1 / -1;
+  padding: 10px;
+}
+
+.rag-artifact-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.rag-artifact-row {
+  align-items: center;
+  border-top: 1px solid #edf0f5;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding-top: 8px;
+}
+
+.rag-artifact-row div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rag-artifact-row button,
+.rag-artifact-row a {
+  border: 1px solid #cfd5df;
+  border-radius: 6px;
+  background: #fff;
+  color: #15171a;
+  cursor: pointer;
+  min-height: 34px;
+  padding: 7px 10px;
+  text-decoration: none;
+}
+
+.rag-artifact-viewer {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.rag-artifact-viewer div {
+  display: grid;
+  gap: 3px;
+}
+
+.rag-artifact-viewer span {
+  color: #667085;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.rag-artifact-viewer pre {
+  background: #0f172a;
+  border-radius: 8px;
+  color: #e5e7eb;
+  max-height: 340px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
 .rag-citation {
   display: grid;
   gap: 4px;
@@ -294,8 +644,19 @@
   }
 
   .rag-control-grid,
-  .rag-metrics {
+  .rag-metrics,
+  .rag-source-editor,
+  .rag-source-options {
     grid-template-columns: 1fr;
+  }
+
+  .rag-source-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .rag-source-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
   }
 }
 
@@ -482,6 +843,7 @@ textarea:focus {
 .empty {
   color: var(--muted);
   display: grid;
+  gap: 12px;
   min-height: 180px;
   place-items: center;
   padding: 24px;

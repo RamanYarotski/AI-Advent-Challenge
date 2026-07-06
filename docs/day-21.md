@@ -5,8 +5,8 @@ Day 21 starts the RAG toolkit as an independent indexing instrument. It reads a 
 ## Implementation
 
 - Formats: Markdown, text, JSON, CSV, HTML, TypeScript/JavaScript/CSS code, and a basic PDF text fallback.
-- Corpus: project docs/code plus `docs/rag-week-chat-notes.md` by default.
-- Sources: one input per line. Supported inputs are local files, local folders, absolute paths, HTTP/HTTPS pages or files, and GitHub repo/tree/blob URLs.
+- Corpus: sources explicitly added in the UI. CLI/API calls without sources still fall back to project docs/code for repeatable demo checks.
+- Sources: upload files, single URL/file, site crawl, GitHub repo/tree/blob URL, or local path available to the running app process.
 - Chunking strategies:
   - fixed: `900` estimated tokens with `120` token overlap by default;
   - structural: file/heading/section-aware chunks with `1200` estimated token limit by default.
@@ -24,7 +24,9 @@ Day 21 starts the RAG toolkit as an independent indexing instrument. It reads a 
 - `overlapTokens`
 - `maxStructuralTokens`
 - `embeddingMode`
-- `sourcesText`
+- Source records: `upload`, `url`, `site`, `github`, `local_path`
+- Source-specific limits: `siteMaxDepth`, `siteMaxPages`, `siteMaxBytesPerPage`, `githubMaxFiles`
+- `sourcesText` remains available only for low-level API/CLI compatibility.
 
 ## Acceptance Checks
 

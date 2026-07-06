@@ -13,6 +13,12 @@
     "rag:day24": "node scripts/rag-all.mjs day24",
     "rag:day25": "node scripts/rag-all.mjs day25",
     "rag:all": "node scripts/rag-all.mjs all",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "playwright test",
+    "test:rag": "npm run rag:all",
+    "test:all": "npm run lint && npm run test:unit && npm run test:integration && npm run build && npm run test:e2e && npm run rag:all",
     "lint": "eslint ."
   },
   "dependencies": {
@@ -24,11 +30,13 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/node": "22.15.29",
     "@types/react": "19.1.6",
     "@types/react-dom": "19.1.5",
     "eslint": "9.28.0",
     "eslint-config-next": "^16.2.7",
-    "typescript": "5.8.3"
+    "typescript": "5.8.3",
+    "vitest": "^4.1.9"
   }
 }

@@ -26,7 +26,8 @@ The chat uses the same retrieval controls as Day 24:
 - `minLexicalOverlap`;
 - `useRewrite`;
 - `sessionId`.
-- Day 21 upstream controls: `sourcesText`, `fixedTokens`, `overlapTokens`, `maxStructuralTokens`, `embeddingMode`, and optional `rebuildIndex`.
+- Day 21 upstream controls: enabled Source Manager records, source-specific crawl limits, `fixedTokens`, `overlapTokens`, `maxStructuralTokens`, `embeddingMode`, and optional `rebuildIndex`.
+- `sourcesText` remains available only for low-level API/CLI compatibility.
 
 ## Scenario Checks
 

@@ -22,7 +22,8 @@ It is still a standalone instrument: it can accept Day 21 indexing controls and 
 - `threshold`: `0.24` by default for local hash embeddings.
 - `useRewrite`: enabled by default.
 - `generationMode`: `local` by default, `llm` optional with fallback.
-- Day 21 upstream controls: `sourcesText`, `fixedTokens`, `overlapTokens`, `maxStructuralTokens`, `embeddingMode`, and optional `rebuildIndex`.
+- Day 21 upstream controls: enabled Source Manager records, source-specific crawl limits, `fixedTokens`, `overlapTokens`, `maxStructuralTokens`, `embeddingMode`, and optional `rebuildIndex`.
+- `sourcesText` remains available only for low-level API/CLI compatibility.
 
 ## Acceptance Checks
 
