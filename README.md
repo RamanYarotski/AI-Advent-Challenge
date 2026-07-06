@@ -34,7 +34,7 @@ Day 21 now uses an explicit source workflow. The UI starts with an empty **Sourc
 - Day 19: added a briefing MCP tool chain that extracts relevant cached messages, builds a challenge digest, and saves JSON/Markdown outputs.
 - Day 20: orchestrated multiple MCP servers into one visible workflow that refreshes the scheduler, builds the digest, reads it through filesystem MCP, checks Git status, and saves a workflow report.
 - Day 21: added the RAG document indexer with upload/URL/site/GitHub/local-path sources, fixed and structural chunking, local hash embeddings, index artifacts, and reset support.
-- Day 22: added the first RAG query tool that compares plain answers with retrieved-context answers.
+- Day 22: added the first RAG query tool that compares plain answers with retrieved-context answers, parses PDF sources into readable text, and shows model presets only for live LLM generation.
 - Day 23: added query rewriting, similarity thresholding, and MMR reranking for cleaner retrieval.
 - Day 24: added cited answers with source quotes and an anti-hallucination fallback to `не знаю` when context is weak.
 - Day 25: added a small RAG chat that keeps task state and returns sources/citations on every assistant turn.
@@ -106,7 +106,7 @@ npm run rag:day25
 npm run rag:all
 ```
 
-RAG data is stored under `.data/rag-week`, including indexes, reports, evaluations, chat state, uploaded files, source records, and artifacts. This local data is intentionally ignored by Git.
+RAG data is stored under `.data/rag-week`, including indexes, reports, evaluations, chat state, uploaded files, source records, and artifacts. This local data is intentionally ignored by Git. After changing PDF extraction or replacing sources, use **Build indexes** with rebuild enabled or **Reset RAG data** so old chunks are regenerated.
 
 ## Checks
 

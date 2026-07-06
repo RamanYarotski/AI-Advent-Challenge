@@ -49,6 +49,12 @@ type SourceState = {
   updatedAt: string;
 };
 
+type RagModelOption = {
+  id: string;
+  label: string;
+  envKey: string;
+};
+
 type ArtifactKey = "day21_report" | "manifest" | "fixed_index" | "structural_index";
 
 type RagArtifact = {
@@ -240,7 +246,9 @@ export default function RagWeekPage() {
   const [strategy, setStrategy] = useState("structural");
   const [topK, setTopK] = useState("8");
   const [generationMode, setGenerationMode] = useState("local");
-  const [model, setModel] = useState("");
+  const [modelOptions, setModelOptions] = useState<RagModelOption[]>([]);
+  const [modelChoice, setModelChoice] = useState("env_default");
+  const [customModel, setCustomModel] = useState("");
   const [temperature, setTemperature] = useState("0.2");
   const [maxTokens, setMaxTokens] = useState("700");
   const [initialTopK, setInitialTopK] = useState("15");
@@ -272,6 +280,15 @@ export default function RagWeekPage() {
     return payload as SourceState;
   }
 
+  async function loadModels() {
+    const response = await fetch("/api/rag/models");
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Failed to load models.");
+    }
+    return payload as { models: RagModelOption[] };
+  }
+
   async function refreshStatus() {
     setStatus(await loadStatus());
   }
@@ -289,10 +306,15 @@ export default function RagWeekPage() {
     async function loadInitialStatus() {
       try {
         setSourcesLoading(true);
-        const [statusPayload, sourcePayload] = await Promise.all([loadStatus(), loadSources()]);
+        const [statusPayload, sourcePayload, modelPayload] = await Promise.all([
+          loadStatus(),
+          loadSources(),
+          loadModels().catch(() => ({ models: [] })),
+        ]);
         if (!cancelled) {
           setStatus(statusPayload);
           setSources(sourcePayload.sources);
+          setModelOptions(modelPayload.models);
         }
       } catch (nextError) {
         if (!cancelled) {
@@ -681,12 +703,80 @@ export default function RagWeekPage() {
   }
 
   function generationPayload() {
+    if (generationMode !== "llm") {
+      return {
+        generationMode,
+      };
+    }
+    const selectedModel = modelChoice === "custom" ? customModel.trim() : modelChoice;
     return {
       generationMode,
-      model: model.trim() || undefined,
+      model: selectedModel === "env_default" ? undefined : selectedModel || undefined,
       temperature: temperature.trim() ? Number(temperature) : undefined,
       maxTokens: maxTokens.trim() ? Number(maxTokens) : undefined,
     };
+  }
+
+  function renderGenerationControls() {
+    return (
+      <>
+        <label>
+          Generation
+          <select
+            onChange={(event) => setGenerationMode(event.target.value)}
+            value={generationMode}
+          >
+            <option value="local">Local extractive</option>
+            <option value="llm">LLM with fallback</option>
+          </select>
+        </label>
+        {generationMode === "llm" && (
+          <>
+            <label>
+              Model
+              <select
+                onChange={(event) => setModelChoice(event.target.value)}
+                value={modelChoice}
+              >
+                <option value="env_default">Environment default</option>
+                {modelOptions.map((option) => (
+                  <option key={`${option.envKey}-${option.id}`} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+            {modelChoice === "custom" && (
+              <label>
+                Custom model
+                <input
+                  onChange={(event) => setCustomModel(event.target.value)}
+                  placeholder="provider/model-id"
+                  value={customModel}
+                />
+              </label>
+            )}
+            <label>
+              Temperature
+              <input
+                inputMode="decimal"
+                onChange={(event) => setTemperature(event.target.value)}
+                value={temperature}
+              />
+            </label>
+            <label>
+              Max tokens
+              <input
+                inputMode="numeric"
+                onChange={(event) => setMaxTokens(event.target.value)}
+                value={maxTokens}
+              />
+            </label>
+          </>
+        )}
+      </>
+    );
   }
 
   function latestSummaryFor(source: ManagedSource) {
@@ -1040,6 +1130,42 @@ export default function RagWeekPage() {
     );
   }
 
+  function chunkPreview(text: string) {
+    const normalized = text
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const words = normalized.match(/[\p{L}\p{N}]{2,}/gu) ?? [];
+    if (normalized.length < 40 || words.length < 6) {
+      return "Unreadable extracted text.";
+    }
+    return normalized.length > 700 ? `${normalized.slice(0, 700)}...` : normalized;
+  }
+
+  function renderSourceReference(source: string) {
+    if (/^https?:\/\//i.test(source)) {
+      return (
+        <a href={source} rel="noreferrer" target="_blank">
+          {source}
+        </a>
+      );
+    }
+    return <code>{source}</code>;
+  }
+
+  function renderRetrievedChunk(match: QueryResult["matches"][number]) {
+    return (
+      <div className="rag-source" key={match.id}>
+        <strong>{match.score.toFixed(3)}</strong>
+        <span>
+          {renderSourceReference(match.metadata.source)} · {match.metadata.section}
+        </span>
+        <code>{match.metadata.chunk_id}</code>
+        <p>{chunkPreview(match.text)}</p>
+      </div>
+    );
+  }
+
   return (
     <main className="rag-shell">
       <section className="rag-toolbar">
@@ -1195,40 +1321,7 @@ export default function RagWeekPage() {
                   value={topK}
                 />
               </label>
-              <label>
-                Generation
-                <select
-                  onChange={(event) => setGenerationMode(event.target.value)}
-                  value={generationMode}
-                >
-                  <option value="local">Local extractive</option>
-                  <option value="llm">LLM with fallback</option>
-                </select>
-              </label>
-              <label>
-                Model
-                <input
-                  onChange={(event) => setModel(event.target.value)}
-                  placeholder="env default"
-                  value={model}
-                />
-              </label>
-              <label>
-                Temperature
-                <input
-                  inputMode="decimal"
-                  onChange={(event) => setTemperature(event.target.value)}
-                  value={temperature}
-                />
-              </label>
-              <label>
-                Max tokens
-                <input
-                  inputMode="numeric"
-                  onChange={(event) => setMaxTokens(event.target.value)}
-                  value={maxTokens}
-                />
-              </label>
+              {renderGenerationControls()}
             </div>
             <button className="run" disabled={queryLoading} type="submit">
               {queryLoading ? "Searching..." : "Compare answers"}
@@ -1253,14 +1346,8 @@ export default function RagWeekPage() {
                 </article>
                 <details open>
                   <summary>Retrieved chunks</summary>
-                  {queryResult.matches.map((match) => (
-                    <div className="rag-source" key={match.id}>
-                      <strong>{match.score.toFixed(3)}</strong>
-                      <span>
-                        {match.metadata.source} · {match.metadata.section}
-                      </span>
-                    </div>
-                  ))}
+                  {queryResult.matches.map((match) => renderRetrievedChunk(match))}
+                  
                 </details>
               </div>
             ) : (
@@ -1318,40 +1405,7 @@ export default function RagWeekPage() {
                   <option value="fixed">Fixed</option>
                 </select>
               </label>
-              <label>
-                Generation
-                <select
-                  onChange={(event) => setGenerationMode(event.target.value)}
-                  value={generationMode}
-                >
-                  <option value="local">Local extractive</option>
-                  <option value="llm">LLM with fallback</option>
-                </select>
-              </label>
-              <label>
-                Model
-                <input
-                  onChange={(event) => setModel(event.target.value)}
-                  placeholder="env default"
-                  value={model}
-                />
-              </label>
-              <label>
-                Temperature
-                <input
-                  inputMode="decimal"
-                  onChange={(event) => setTemperature(event.target.value)}
-                  value={temperature}
-                />
-              </label>
-              <label>
-                Max tokens
-                <input
-                  inputMode="numeric"
-                  onChange={(event) => setMaxTokens(event.target.value)}
-                  value={maxTokens}
-                />
-              </label>
+              {renderGenerationControls()}
             </div>
             <label className="rag-check">
               <input
@@ -1402,14 +1456,8 @@ export default function RagWeekPage() {
                 </article>
                 <details open>
                   <summary>Final chunks</summary>
-                  {rerankResult.reranked.map((match) => (
-                    <div className="rag-source" key={match.id}>
-                      <strong>{match.score.toFixed(3)}</strong>
-                      <span>
-                        {match.metadata.source} · {match.metadata.section}
-                      </span>
-                    </div>
-                  ))}
+                  {rerankResult.reranked.map((match) => renderRetrievedChunk(match))}
+                  
                 </details>
               </div>
             ) : (

@@ -31,6 +31,16 @@ test("Source Manager supports adding, uploading, and removing sources", async ({
   let sources: TestSource[] = [];
   let manifest: null | Record<string, unknown> = null;
 
+  await page.route("**/api/rag/models**", async (route) => {
+    await route.fulfill({
+      json: {
+        models: [
+          { id: "openai/gpt-4o-mini", label: "Weak: openai/gpt-4o-mini", envKey: "MODEL_WEAK" },
+        ],
+      },
+    });
+  });
+
   await page.route("**/api/rag/status**", async (route) => {
     await route.fulfill({ json: { manifest } });
   });
@@ -193,4 +203,121 @@ test("Source Manager supports adding, uploading, and removing sources", async ({
   await expect(page.getByText("No sources to index yet. Upload files or add a URL, site, GitHub source, or local path.")).toBeVisible();
   await expect(page.getByText("Indexed sections")).not.toBeVisible();
   await expect(page.locator(".rag-source-row", { hasText: "README.md" })).not.toBeVisible();
+});
+
+test("Day 22 shows model presets only for LLM mode and readable retrieved chunks", async ({ page }) => {
+  await page.route("**/api/rag/status**", async (route) => {
+    await route.fulfill({
+      json: {
+        manifest: {
+          day21: {
+            comparison: {
+              documentCount: 1,
+              fixedChunks: 2,
+              structuralChunks: 1,
+              fixedAverageTokens: 100,
+              structuralAverageTokens: 140,
+              recommendation: "Structural chunks preserve PDF sections.",
+            },
+            embeddingProvider: "local_hash",
+            sourceSummaries: [
+              { input: "https://example.test/ai.pdf", type: "url", documentCount: 1 },
+            ],
+            warnings: [],
+            updatedAt: "2026-07-06T00:00:00.000Z",
+          },
+        },
+      },
+    });
+  });
+
+  await page.route("**/api/rag/models**", async (route) => {
+    await route.fulfill({
+      json: {
+        models: [
+          { id: "openai/gpt-4o-mini", label: "Weak: openai/gpt-4o-mini", envKey: "MODEL_WEAK" },
+          { id: "qwen/qwen3-32b", label: "Medium: qwen/qwen3-32b", envKey: "MODEL_MEDIUM" },
+        ],
+      },
+    });
+  });
+
+  await page.route(/\/api\/rag\/sources\/?(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      json: sourceState([
+        {
+          id: "source-ai-pdf",
+          type: "url",
+          label: "AI PDF",
+          value: "https://example.test/ai.pdf",
+        },
+      ]),
+    });
+  });
+
+  await page.route(/\/api\/rag\/query\/?(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      json: {
+        question: "кто ввел термин ИИ?",
+        strategy: "structural",
+        topK: 1,
+        plain: {
+          answer: "Без контекста из индекса ответ не может быть проверен.",
+          mode: "local",
+          model: "local-extractive",
+        },
+        rag: {
+          answer:
+            "Вопрос: кто ввел термин ИИ?\n\nОтвет на основе найденных чанков:\nТермин искусственный интеллект был предложен Джоном Маккарти на семинаре в Дартмутском университете.",
+          mode: "local",
+          model: "local-extractive",
+        },
+        matches: [
+          {
+            id: "chunk-ai-1",
+            score: 0.91,
+            text:
+              "Термин искусственный интеллект был предложен Джоном Маккарти на семинаре в Дартмутском университете. Этот фрагмент нужен для проверки читаемого preview retrieved chunk в интерфейсе Day 22.",
+            estimatedTokens: 42,
+            metadata: {
+              source: "https://example.test/ai.pdf",
+              title: "ai.pdf",
+              section: "Происхождение и смысл термина",
+              chunk_id: "ai.pdf::section-1",
+              strategy: "structural",
+            },
+          },
+        ],
+        comparedAt: "2026-07-06T00:00:00.000Z",
+      },
+    });
+  });
+
+  await page.goto("/rag");
+  await page.getByRole("button", { name: "Day 22 RAG" }).click();
+
+  await expect(page.getByLabel("Generation")).toHaveValue("local");
+  await expect(page.getByLabel("Model", { exact: true })).not.toBeVisible();
+  await expect(page.getByLabel("Temperature", { exact: true })).not.toBeVisible();
+  await expect(page.getByLabel("Max tokens", { exact: true })).not.toBeVisible();
+
+  await page.getByLabel("Generation").selectOption("llm");
+  await expect(page.getByLabel("Model")).toBeVisible();
+  await expect(page.getByRole("option", { name: "Weak: openai/gpt-4o-mini" })).toBeAttached();
+  await page.getByLabel("Model").selectOption("custom");
+  await expect(page.getByLabel("Custom model")).toBeVisible();
+  await page.getByLabel("Custom model").fill("custom/provider-model");
+
+  await page.getByLabel("Generation").selectOption("local");
+  await page.getByRole("button", { name: "Compare answers" }).click();
+
+  await expect(page.getByText("Retrieved chunks")).toBeVisible();
+  await expect(page.getByRole("link", { name: "https://example.test/ai.pdf" })).toBeVisible();
+  await expect(page.getByText("Происхождение и смысл термина")).toBeVisible();
+  await expect(page.getByText("ai.pdf::section-1")).toBeVisible();
+  await expect(
+    page.locator(".rag-source p").filter({
+      hasText: "Термин искусственный интеллект был предложен Джоном Маккарти",
+    }),
+  ).toBeVisible();
 });
