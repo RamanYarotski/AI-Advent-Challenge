@@ -102,9 +102,20 @@
   min-height: 40px;
   border: 1px solid #cfd5df;
   border-radius: 6px;
+  min-width: 0;
   padding: 0 10px;
+  width: 100%;
   color: #15171a;
   background: #fff;
+}
+
+.rag-pipeline {
+  background: #fbfcfe;
+  margin: 14px 0;
+}
+
+.rag-source-profile {
+  margin-top: 12px;
 }
 
 .rag-textarea-label {
@@ -196,10 +207,31 @@
 
 .rag-source {
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr);
+  grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
   gap: 8px;
   padding: 8px 0;
   border-top: 1px solid #edf0f5;
+}
+
+.rag-source span {
+  overflow-wrap: anywhere;
+}
+
+.rag-warning-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.rag-warning-list p {
+  background: #fffaeb;
+  border: 1px solid #fedf89;
+  border-radius: 6px;
+  color: #93370d;
+  font-size: 13px;
+  margin: 0;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
 }
 
 .rag-citation {

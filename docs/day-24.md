@@ -1,6 +1,7 @@
 # Day 24. Citations, Sources, and Anti-Hallucination
 
 Day 24 turns the improved retrieval pipeline into a stricter answer instrument.
+It keeps the full upstream controls from Day 21 and Day 23, then adds citation and anti-hallucination gates.
 
 ## Implementation
 
@@ -23,6 +24,7 @@ Day 24 turns the improved retrieval pipeline into a stricter answer instrument.
 - `threshold`: defaults to `minScore`.
 - `minLexicalOverlap`: `0.08` by default.
 - `useRewrite`: enabled by default.
+- Day 21 upstream controls: `sourcesText`, `fixedTokens`, `overlapTokens`, `maxStructuralTokens`, `embeddingMode`, and optional `rebuildIndex`.
 
 ## Acceptance Checks
 

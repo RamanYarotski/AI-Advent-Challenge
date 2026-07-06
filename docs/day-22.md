@@ -1,6 +1,7 @@
 # Day 22. First RAG Query
 
 Day 22 adds the first question-answering instrument on top of the Day 21 indexes.
+It exposes the Day 21 source and indexing controls too, so it can rebuild the index from a different corpus before answering.
 
 ## Implementation
 
@@ -19,6 +20,7 @@ Day 22 adds the first question-answering instrument on top of the Day 21 indexes
 - `topK`: `8` by default.
 - `generationMode`: `local` by default, `llm` optional with local fallback.
 - `model`, `temperature`, and `maxTokens` can be passed for live LLM generation.
+- Day 21 upstream controls: `sourcesText`, `fixedTokens`, `overlapTokens`, `maxStructuralTokens`, `embeddingMode`, and optional `rebuildIndex`.
 
 ## Control Questions
 
@@ -35,4 +37,3 @@ The evaluation set contains 10 questions about the indexed project and RAG-week 
 - `npm run rag:day22`
 - `npm run lint`
 - `npm run build`
-

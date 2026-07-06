@@ -5,7 +5,8 @@ Day 21 starts the RAG toolkit as an independent indexing instrument. It reads a 
 ## Implementation
 
 - Formats: Markdown, text, JSON, CSV, HTML, TypeScript/JavaScript/CSS code, and a basic PDF text fallback.
-- Corpus: project docs/code plus `docs/rag-week-chat-notes.md`.
+- Corpus: project docs/code plus `docs/rag-week-chat-notes.md` by default.
+- Sources: one input per line. Supported inputs are local files, local folders, absolute paths, HTTP/HTTPS pages or files, and GitHub repo/tree/blob URLs.
 - Chunking strategies:
   - fixed: `900` estimated tokens with `120` token overlap by default;
   - structural: file/heading/section-aware chunks with `1200` estimated token limit by default.
@@ -23,10 +24,10 @@ Day 21 starts the RAG toolkit as an independent indexing instrument. It reads a 
 - `overlapTokens`
 - `maxStructuralTokens`
 - `embeddingMode`
+- `sourcesText`
 
 ## Acceptance Checks
 
 - `npm run rag:day21`
 - `npm run lint`
 - `npm run build`
-

@@ -1,6 +1,7 @@
 # Day 23. Reranking and Filtering
 
 Day 23 adds the second retrieval stage after the first vector search.
+It is still a standalone instrument: it can accept Day 21 indexing controls and rebuild the index before running the Day 23 retrieval pipeline.
 
 ## Implementation
 
@@ -21,10 +22,10 @@ Day 23 adds the second retrieval stage after the first vector search.
 - `threshold`: `0.24` by default for local hash embeddings.
 - `useRewrite`: enabled by default.
 - `generationMode`: `local` by default, `llm` optional with fallback.
+- Day 21 upstream controls: `sourcesText`, `fixedTokens`, `overlapTokens`, `maxStructuralTokens`, `embeddingMode`, and optional `rebuildIndex`.
 
 ## Acceptance Checks
 
 - `npm run rag:day23`
 - `npm run lint`
 - `npm run build`
-

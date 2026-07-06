@@ -1,6 +1,7 @@
 # Day 25. Mini Chat with RAG and Task Memory
 
 Day 25 wraps the RAG pipeline into a mini chat instrument.
+It remains a standalone tool: each chat turn can use the full Day 21 indexing controls, Day 23 retrieval controls, and Day 24 citation gates.
 
 ## Implementation
 
@@ -25,6 +26,7 @@ The chat uses the same retrieval controls as Day 24:
 - `minLexicalOverlap`;
 - `useRewrite`;
 - `sessionId`.
+- Day 21 upstream controls: `sourcesText`, `fixedTokens`, `overlapTokens`, `maxStructuralTokens`, `embeddingMode`, and optional `rebuildIndex`.
 
 ## Scenario Checks
 
@@ -41,4 +43,3 @@ The report verifies that the assistant keeps a task goal, records constraints/te
 - `npm run rag:all`
 - `npm run lint`
 - `npm run build`
-

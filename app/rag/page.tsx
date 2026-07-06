@@ -15,6 +15,14 @@ type RagStatus = {
         recommendation: string;
       };
       embeddingProvider: string;
+      sourceInputs?: string[];
+      sourceSummaries?: Array<{
+        input: string;
+        type: string;
+        documentCount: number;
+        warning?: string;
+      }>;
+      warnings?: string[];
       updatedAt: string;
     };
   };
@@ -130,6 +138,15 @@ type RagChatResult = {
   };
 };
 
+const defaultSourcesText = [
+  "README.md",
+  "docs",
+  "lib",
+  "app/api",
+  "mcp",
+  "docs/rag-week-chat-notes.md",
+].join("\n");
+
 export default function RagWeekPage() {
   const [activeStage, setActiveStage] = useState<
     "day21" | "day22" | "day23" | "day24" | "day25"
@@ -147,12 +164,17 @@ export default function RagWeekPage() {
   const [overlapTokens, setOverlapTokens] = useState("120");
   const [maxStructuralTokens, setMaxStructuralTokens] = useState("1200");
   const [embeddingMode, setEmbeddingMode] = useState("local_hash");
+  const [sourcesText, setSourcesText] = useState(defaultSourcesText);
+  const [rebuildIndex, setRebuildIndex] = useState(false);
   const [question, setQuestion] = useState(
     "Что должен делать RAG ассистент при слабом контексте?",
   );
   const [strategy, setStrategy] = useState("structural");
   const [topK, setTopK] = useState("8");
   const [generationMode, setGenerationMode] = useState("local");
+  const [model, setModel] = useState("");
+  const [temperature, setTemperature] = useState("0.2");
+  const [maxTokens, setMaxTokens] = useState("700");
   const [initialTopK, setInitialTopK] = useState("15");
   const [finalTopK, setFinalTopK] = useState("5");
   const [threshold, setThreshold] = useState("0.24");
@@ -206,6 +228,7 @@ export default function RagWeekPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          sourcesText,
           fixedTokens: Number(fixedTokens),
           overlapTokens: Number(overlapTokens),
           maxStructuralTokens: Number(maxStructuralTokens),
@@ -234,6 +257,7 @@ export default function RagWeekPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...pipelinePayload(),
           question,
           strategy,
           topK: Number(topK),
@@ -262,6 +286,7 @@ export default function RagWeekPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...pipelinePayload(),
           question,
           strategy,
           initialTopK: Number(initialTopK),
@@ -293,6 +318,7 @@ export default function RagWeekPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...pipelinePayload(),
           question,
           strategy,
           initialTopK: Number(initialTopK),
@@ -325,6 +351,7 @@ export default function RagWeekPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...pipelinePayload(),
           sessionId,
           message: chatMessage,
           strategy,
@@ -351,6 +378,106 @@ export default function RagWeekPage() {
   }
 
   const latest = result?.comparison ?? status?.manifest?.day21?.comparison ?? null;
+  const latestSources = status?.manifest?.day21?.sourceSummaries ?? [];
+  const latestWarnings = status?.manifest?.day21?.warnings ?? [];
+
+  function pipelinePayload() {
+    return {
+      sourcesText,
+      fixedTokens: Number(fixedTokens),
+      overlapTokens: Number(overlapTokens),
+      maxStructuralTokens: Number(maxStructuralTokens),
+      embeddingMode,
+      rebuildIndex,
+      model: model.trim() || undefined,
+      temperature: temperature.trim() ? Number(temperature) : undefined,
+      maxTokens: maxTokens.trim() ? Number(maxTokens) : undefined,
+    };
+  }
+
+  function renderPipelineControls(options: { allowRebuild: boolean }) {
+    return (
+      <details className="rag-pipeline" open>
+        <summary>Pipeline parameters</summary>
+        <label className="rag-textarea-label">
+          Sources
+          <textarea
+            onChange={(event) => setSourcesText(event.target.value)}
+            placeholder="One source per line: docs, README.md, C:\path\repo, https://example.com/page, https://github.com/owner/repo"
+            rows={6}
+            value={sourcesText}
+          />
+        </label>
+        <div className="rag-control-grid">
+          <label>
+            Fixed chunk tokens
+            <input
+              inputMode="numeric"
+              onChange={(event) => setFixedTokens(event.target.value)}
+              value={fixedTokens}
+            />
+          </label>
+          <label>
+            Overlap tokens
+            <input
+              inputMode="numeric"
+              onChange={(event) => setOverlapTokens(event.target.value)}
+              value={overlapTokens}
+            />
+          </label>
+          <label>
+            Structural max tokens
+            <input
+              inputMode="numeric"
+              onChange={(event) => setMaxStructuralTokens(event.target.value)}
+              value={maxStructuralTokens}
+            />
+          </label>
+          <label>
+            Embeddings
+            <select
+              onChange={(event) => setEmbeddingMode(event.target.value)}
+              value={embeddingMode}
+            >
+              <option value="local_hash">Local hash</option>
+              <option value="api">API with fallback</option>
+            </select>
+          </label>
+        </div>
+        {options.allowRebuild && (
+          <label className="rag-check">
+            <input
+              checked={rebuildIndex}
+              onChange={(event) => setRebuildIndex(event.target.checked)}
+              type="checkbox"
+            />
+            Rebuild index before running this stage
+          </label>
+        )}
+        {latestSources.length > 0 && (
+          <details className="rag-source-profile">
+            <summary>Current index sources</summary>
+            {latestSources.map((source) => (
+              <div className="rag-source" key={`${source.type}-${source.input}`}>
+                <strong>{source.type}</strong>
+                <span>
+                  {source.input} · {source.documentCount} document(s)
+                  {source.warning ? ` · ${source.warning}` : ""}
+                </span>
+              </div>
+            ))}
+          </details>
+        )}
+        {latestWarnings.length > 0 && (
+          <div className="rag-warning-list">
+            {latestWarnings.map((warning) => (
+              <p key={warning}>{warning}</p>
+            ))}
+          </div>
+        )}
+      </details>
+    );
+  }
 
   return (
     <main className="rag-shell">
@@ -409,42 +536,7 @@ export default function RagWeekPage() {
               <h2>Document indexer</h2>
               <span>{status?.manifest?.day21?.embeddingProvider ?? "not indexed"}</span>
             </div>
-            <div className="rag-control-grid">
-              <label>
-                Fixed chunk tokens
-                <input
-                  inputMode="numeric"
-                  onChange={(event) => setFixedTokens(event.target.value)}
-                  value={fixedTokens}
-                />
-              </label>
-              <label>
-                Overlap tokens
-                <input
-                  inputMode="numeric"
-                  onChange={(event) => setOverlapTokens(event.target.value)}
-                  value={overlapTokens}
-                />
-              </label>
-              <label>
-                Structural max tokens
-                <input
-                  inputMode="numeric"
-                  onChange={(event) => setMaxStructuralTokens(event.target.value)}
-                  value={maxStructuralTokens}
-                />
-              </label>
-              <label>
-                Embeddings
-                <select
-                  onChange={(event) => setEmbeddingMode(event.target.value)}
-                  value={embeddingMode}
-                >
-                  <option value="local_hash">Local hash</option>
-                  <option value="api">API with fallback</option>
-                </select>
-              </label>
-            </div>
+            {renderPipelineControls({ allowRebuild: false })}
             <button className="run" disabled={loading} type="submit">
               {loading ? "Indexing..." : "Build indexes"}
             </button>
@@ -495,6 +587,7 @@ export default function RagWeekPage() {
               <h2>RAG query</h2>
               <span>{strategy}</span>
             </div>
+            {renderPipelineControls({ allowRebuild: true })}
             <label className="rag-textarea-label">
               Question
               <textarea
@@ -528,6 +621,30 @@ export default function RagWeekPage() {
                   <option value="local">Local extractive</option>
                   <option value="llm">LLM with fallback</option>
                 </select>
+              </label>
+              <label>
+                Model
+                <input
+                  onChange={(event) => setModel(event.target.value)}
+                  placeholder="env default"
+                  value={model}
+                />
+              </label>
+              <label>
+                Temperature
+                <input
+                  inputMode="decimal"
+                  onChange={(event) => setTemperature(event.target.value)}
+                  value={temperature}
+                />
+              </label>
+              <label>
+                Max tokens
+                <input
+                  inputMode="numeric"
+                  onChange={(event) => setMaxTokens(event.target.value)}
+                  value={maxTokens}
+                />
               </label>
             </div>
             <button className="run" disabled={queryLoading} type="submit">
@@ -577,6 +694,7 @@ export default function RagWeekPage() {
               <h2>Filter and rerank</h2>
               <span>{strategy}</span>
             </div>
+            {renderPipelineControls({ allowRebuild: true })}
             <label className="rag-textarea-label">
               Question
               <textarea
@@ -592,14 +710,6 @@ export default function RagWeekPage() {
                   inputMode="numeric"
                   onChange={(event) => setInitialTopK(event.target.value)}
                   value={initialTopK}
-                />
-              </label>
-              <label>
-                Lexical overlap
-                <input
-                  inputMode="decimal"
-                  onChange={(event) => setMinLexicalOverlap(event.target.value)}
-                  value={minLexicalOverlap}
                 />
               </label>
               <label>
@@ -624,6 +734,40 @@ export default function RagWeekPage() {
                   <option value="structural">Structural</option>
                   <option value="fixed">Fixed</option>
                 </select>
+              </label>
+              <label>
+                Generation
+                <select
+                  onChange={(event) => setGenerationMode(event.target.value)}
+                  value={generationMode}
+                >
+                  <option value="local">Local extractive</option>
+                  <option value="llm">LLM with fallback</option>
+                </select>
+              </label>
+              <label>
+                Model
+                <input
+                  onChange={(event) => setModel(event.target.value)}
+                  placeholder="env default"
+                  value={model}
+                />
+              </label>
+              <label>
+                Temperature
+                <input
+                  inputMode="decimal"
+                  onChange={(event) => setTemperature(event.target.value)}
+                  value={temperature}
+                />
+              </label>
+              <label>
+                Max tokens
+                <input
+                  inputMode="numeric"
+                  onChange={(event) => setMaxTokens(event.target.value)}
+                  value={maxTokens}
+                />
               </label>
             </div>
             <label className="rag-check">
@@ -699,6 +843,7 @@ export default function RagWeekPage() {
               <h2>Cited answer</h2>
               <span>{strategy}</span>
             </div>
+            {renderPipelineControls({ allowRebuild: true })}
             <label className="rag-textarea-label">
               Question
               <textarea
@@ -708,6 +853,13 @@ export default function RagWeekPage() {
               />
             </label>
             <div className="rag-control-grid">
+              <label>
+                Strategy
+                <select onChange={(event) => setStrategy(event.target.value)} value={strategy}>
+                  <option value="structural">Structural</option>
+                  <option value="fixed">Fixed</option>
+                </select>
+              </label>
               <label>
                 Min score
                 <input
@@ -722,6 +874,14 @@ export default function RagWeekPage() {
                   inputMode="decimal"
                   onChange={(event) => setThreshold(event.target.value)}
                   value={threshold}
+                />
+              </label>
+              <label>
+                Lexical gate
+                <input
+                  inputMode="decimal"
+                  onChange={(event) => setMinLexicalOverlap(event.target.value)}
+                  value={minLexicalOverlap}
                 />
               </label>
               <label>
@@ -815,6 +975,7 @@ export default function RagWeekPage() {
               <h2>RAG chat</h2>
               <span>{sessionId}</span>
             </div>
+            {renderPipelineControls({ allowRebuild: true })}
             <div className="rag-control-grid">
               <label>
                 Session
@@ -824,11 +985,34 @@ export default function RagWeekPage() {
                 />
               </label>
               <label>
+                Strategy
+                <select onChange={(event) => setStrategy(event.target.value)} value={strategy}>
+                  <option value="structural">Structural</option>
+                  <option value="fixed">Fixed</option>
+                </select>
+              </label>
+              <label>
                 Min score
                 <input
                   inputMode="decimal"
                   onChange={(event) => setMinScore(event.target.value)}
                   value={minScore}
+                />
+              </label>
+              <label>
+                Threshold
+                <input
+                  inputMode="decimal"
+                  onChange={(event) => setThreshold(event.target.value)}
+                  value={threshold}
+                />
+              </label>
+              <label>
+                Lexical gate
+                <input
+                  inputMode="decimal"
+                  onChange={(event) => setMinLexicalOverlap(event.target.value)}
+                  value={minLexicalOverlap}
                 />
               </label>
               <label>
@@ -848,6 +1032,14 @@ export default function RagWeekPage() {
                 />
               </label>
             </div>
+            <label className="rag-check">
+              <input
+                checked={useRewrite}
+                onChange={(event) => setUseRewrite(event.target.checked)}
+                type="checkbox"
+              />
+              Query rewrite
+            </label>
             <label className="rag-textarea-label">
               Message
               <textarea
