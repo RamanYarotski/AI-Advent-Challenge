@@ -11,6 +11,8 @@
     "rag:day22": "node scripts/rag-all.mjs day22",
     "rag:day23": "node scripts/rag-all.mjs day23",
     "rag:day24": "node scripts/rag-all.mjs day24",
+    "rag:day25": "node scripts/rag-all.mjs day25",
+    "rag:all": "node scripts/rag-all.mjs all",
     "lint": "eslint ."
   },
   "dependencies": {

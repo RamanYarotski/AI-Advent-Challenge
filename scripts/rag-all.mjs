@@ -3,12 +3,13 @@ import {
   runDay22Evaluation,
   runDay23Evaluation,
   runDay24Evaluation,
+  runDay25Evaluation,
 } from "../lib/rag/core.mjs";
 
 const stage = process.argv[2] || "day21";
 
 async function main() {
-  if (!["day21", "day22", "day23", "day24", "all"].includes(stage)) {
+  if (!["day21", "day22", "day23", "day24", "day25", "all"].includes(stage)) {
     throw new Error(`Unsupported RAG stage: ${stage}`);
   }
   const day21 = await runDay21Indexing({});
@@ -45,6 +46,14 @@ async function main() {
       negativeStatus: day24.evaluation.negative.status,
       reportPath: day24.reportPath,
       evaluationPath: day24.evaluationPath,
+    };
+  }
+  if (stage === "day25" || stage === "all") {
+    const day25 = await runDay25Evaluation({});
+    output.day25 = {
+      scenarioCount: day25.evaluation.scenarios.length,
+      reportPath: day25.reportPath,
+      evaluationPath: day25.evaluationPath,
     };
   }
   console.log(JSON.stringify({ stage, ...output }, null, 2));

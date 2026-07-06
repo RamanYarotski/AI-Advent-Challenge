@@ -104,15 +104,42 @@ type CitedAnswerResult = {
   }>;
 };
 
+type RagChatResult = {
+  session: {
+    id: string;
+    messages: Array<{
+      role: "user" | "assistant";
+      content: string;
+      sources?: unknown[];
+      citations?: unknown[];
+      status?: string;
+      createdAt: string;
+    }>;
+    taskState: {
+      goal: string;
+      constraints: string[];
+      terms: string[];
+      clarifications: string[];
+    };
+  };
+  assistantMessage: {
+    content: string;
+    sources: unknown[];
+    citations: unknown[];
+    status: string;
+  };
+};
+
 export default function RagWeekPage() {
-  const [activeStage, setActiveStage] = useState<"day21" | "day22" | "day23" | "day24">(
-    "day21",
-  );
+  const [activeStage, setActiveStage] = useState<
+    "day21" | "day22" | "day23" | "day24" | "day25"
+  >("day21");
   const [status, setStatus] = useState<RagStatus | null>(null);
   const [result, setResult] = useState<IndexResult | null>(null);
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
   const [rerankResult, setRerankResult] = useState<RerankResult | null>(null);
   const [citedResult, setCitedResult] = useState<CitedAnswerResult | null>(null);
+  const [chatResult, setChatResult] = useState<RagChatResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [queryLoading, setQueryLoading] = useState(false);
@@ -132,6 +159,10 @@ export default function RagWeekPage() {
   const [minScore, setMinScore] = useState("0.24");
   const [minLexicalOverlap, setMinLexicalOverlap] = useState("0.08");
   const [useRewrite, setUseRewrite] = useState(true);
+  const [sessionId, setSessionId] = useState("day25-demo");
+  const [chatMessage, setChatMessage] = useState(
+    "Цель: подготовить сдачу RAG недели. Какие источники и цитаты важны для Day 24?",
+  );
 
   async function loadStatus() {
     const response = await fetch("/api/rag/status");
@@ -285,6 +316,40 @@ export default function RagWeekPage() {
     }
   }
 
+  async function runChatTurn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setQueryLoading(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/rag/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId,
+          message: chatMessage,
+          strategy,
+          initialTopK: Number(initialTopK),
+          finalTopK: Number(finalTopK),
+          threshold: Number(threshold),
+          minScore: Number(minScore),
+          minLexicalOverlap: Number(minLexicalOverlap),
+          useRewrite,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "RAG chat failed.");
+      }
+      setChatResult(payload);
+      setChatMessage("");
+      setActiveStage("day25");
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "RAG chat failed.");
+    } finally {
+      setQueryLoading(false);
+    }
+  }
+
   const latest = result?.comparison ?? status?.manifest?.day21?.comparison ?? null;
 
   return (
@@ -328,7 +393,11 @@ export default function RagWeekPage() {
         >
           Day 24 Citations
         </button>
-        <button disabled type="button">
+        <button
+          className={activeStage === "day25" ? "active" : ""}
+          onClick={() => setActiveStage("day25")}
+          type="button"
+        >
           Day 25 Chat
         </button>
       </nav>
@@ -734,6 +803,112 @@ export default function RagWeekPage() {
               </div>
             ) : (
               <div className="empty">Run a cited answer to inspect grounding.</div>
+            )}
+          </section>
+        </section>
+      )}
+
+      {activeStage === "day25" && (
+        <section className="rag-tool-grid">
+          <form className="rag-panel" onSubmit={runChatTurn}>
+            <div className="card-head">
+              <h2>RAG chat</h2>
+              <span>{sessionId}</span>
+            </div>
+            <div className="rag-control-grid">
+              <label>
+                Session
+                <input
+                  onChange={(event) => setSessionId(event.target.value)}
+                  value={sessionId}
+                />
+              </label>
+              <label>
+                Min score
+                <input
+                  inputMode="decimal"
+                  onChange={(event) => setMinScore(event.target.value)}
+                  value={minScore}
+                />
+              </label>
+              <label>
+                Initial top-K
+                <input
+                  inputMode="numeric"
+                  onChange={(event) => setInitialTopK(event.target.value)}
+                  value={initialTopK}
+                />
+              </label>
+              <label>
+                Final top-K
+                <input
+                  inputMode="numeric"
+                  onChange={(event) => setFinalTopK(event.target.value)}
+                  value={finalTopK}
+                />
+              </label>
+            </div>
+            <label className="rag-textarea-label">
+              Message
+              <textarea
+                onChange={(event) => setChatMessage(event.target.value)}
+                rows={5}
+                value={chatMessage}
+              />
+            </label>
+            <button className="run" disabled={queryLoading || !chatMessage.trim()} type="submit">
+              {queryLoading ? "Sending..." : "Send"}
+            </button>
+            {error && <p className="rag-error">{error}</p>}
+          </form>
+
+          <section className="rag-panel">
+            <div className="card-head">
+              <h2>Task memory</h2>
+              <span>{chatResult ? `${chatResult.session.messages.length} messages` : "pending"}</span>
+            </div>
+            {chatResult ? (
+              <div className="rag-answer-grid">
+                <div className="rag-task-state">
+                  <strong>Goal</strong>
+                  <p>{chatResult.session.taskState.goal || "n/a"}</p>
+                  <strong>Constraints</strong>
+                  <p>{chatResult.session.taskState.constraints.join("; ") || "n/a"}</p>
+                  <strong>Terms</strong>
+                  <p>{chatResult.session.taskState.terms.join("; ") || "n/a"}</p>
+                  <strong>Clarifications</strong>
+                  <p>{chatResult.session.taskState.clarifications.join("; ") || "n/a"}</p>
+                </div>
+                <article>
+                  <h3>Last answer</h3>
+                  <pre>{chatResult.assistantMessage.content}</pre>
+                </article>
+                <div className="rag-metrics">
+                  <article>
+                    <strong>{chatResult.assistantMessage.sources.length}</strong>
+                    <span>sources</span>
+                  </article>
+                  <article>
+                    <strong>{chatResult.assistantMessage.citations.length}</strong>
+                    <span>citations</span>
+                  </article>
+                  <article>
+                    <strong>{chatResult.assistantMessage.status}</strong>
+                    <span>status</span>
+                  </article>
+                </div>
+                <details open>
+                  <summary>Conversation</summary>
+                  {chatResult.session.messages.map((message, index) => (
+                    <div className="rag-chat-message" key={`${message.role}-${index}`}>
+                      <strong>{message.role}</strong>
+                      <pre>{message.content}</pre>
+                    </div>
+                  ))}
+                </details>
+              </div>
+            ) : (
+              <div className="empty">Send a message to start a RAG chat session.</div>
             )}
           </section>
         </section>
