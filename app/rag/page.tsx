@@ -257,11 +257,11 @@ export default function RagWeekPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...pipelinePayload(),
+          ...indexPipelinePayload(),
+          ...generationPayload(),
           question,
           strategy,
           topK: Number(topK),
-          generationMode,
         }),
       });
       const payload = await response.json();
@@ -286,14 +286,14 @@ export default function RagWeekPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...pipelinePayload(),
+          ...indexPipelinePayload(),
+          ...generationPayload(),
           question,
           strategy,
           initialTopK: Number(initialTopK),
           finalTopK: Number(finalTopK),
           threshold: Number(threshold),
           useRewrite,
-          generationMode,
         }),
       });
       const payload = await response.json();
@@ -318,7 +318,7 @@ export default function RagWeekPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...pipelinePayload(),
+          ...indexPipelinePayload(),
           question,
           strategy,
           initialTopK: Number(initialTopK),
@@ -351,7 +351,7 @@ export default function RagWeekPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...pipelinePayload(),
+          ...indexPipelinePayload(),
           sessionId,
           message: chatMessage,
           strategy,
@@ -381,7 +381,7 @@ export default function RagWeekPage() {
   const latestSources = status?.manifest?.day21?.sourceSummaries ?? [];
   const latestWarnings = status?.manifest?.day21?.warnings ?? [];
 
-  function pipelinePayload() {
+  function indexPipelinePayload() {
     return {
       sourcesText,
       fixedTokens: Number(fixedTokens),
@@ -389,6 +389,12 @@ export default function RagWeekPage() {
       maxStructuralTokens: Number(maxStructuralTokens),
       embeddingMode,
       rebuildIndex,
+    };
+  }
+
+  function generationPayload() {
+    return {
+      generationMode,
       model: model.trim() || undefined,
       temperature: temperature.trim() ? Number(temperature) : undefined,
       maxTokens: maxTokens.trim() ? Number(maxTokens) : undefined,
